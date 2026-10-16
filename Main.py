@@ -1,13 +1,15 @@
 """Điểm vào của game. Chạy:  python main.py"""
 import random
 import tkinter as tk
-from tkinter import messagebox
+from tkinter import messagebox, simpledialog
 
 import kinhte
+import scores
+import theme
 from kinhte import BUILDINGS, BUILD_SPRITES, TECH_WIN, TOWERS_WIN, cost_text
 from dark import Darkness, RINGS, GRACE_TICKS, TICK_MS, is_lit
 from map import COLS, ROWS, SIZE, CELL, GRASS, TERRAIN_VI, generate_map
-from menu import PANEL, PANEL_W, MenuFrame, GamePanel, show_guide
+from menu import PANEL_W, MenuFrame, GamePanel, show_guide, show_scores
 
 
 def pick_tutorial_tile(terrain):
@@ -37,15 +39,19 @@ class Game:
         self.canvas.bind("<Button-1>", self.on_click)
         self.canvas.bind("<Double-Button-1>", self.on_double_click)
 
-        self.panel = tk.Frame(root, bg=PANEL, width=PANEL_W, height=ROWS * CELL + 6)
+        self.panel = tk.Frame(root, bg=theme.c("panel"), width=PANEL_W, height=ROWS * CELL + 6)
         self.panel.grid(row=0, column=1, sticky="ns")
         self.panel.pack_propagate(False)
         self.menu = MenuFrame(self.panel, self.play, self.regenerate,
-                              lambda: show_guide(self.root))
+                              lambda: show_guide(self.root),
+                              lambda: show_scores(self.root),
+                              self.toggle_theme)
         self.hud = GamePanel(self.panel, self.toggle_pause, self.back_to_menu,
-                             lambda: self.set_speed(self.speed % 3 + 1))
+                             lambda: self.set_speed(self.speed % 3 + 1),
+                             self.toggle_theme)
 
         root.bind("<space>", lambda e: self.toggle_pause())
+        root.bind("<t>", lambda e: self.toggle_theme())
         for n in (1, 2, 3):
             root.bind(str(n), lambda e, n=n: self.set_speed(n))
         self.dark = Darkness()
@@ -154,6 +160,15 @@ class Game:
         self.hud.set_speed(speed)
         self.schedule()
 
+    def toggle_theme(self):
+        """Đổi giao diện sáng/tối: tô lại panel, các cửa sổ phụ và vẽ lại bản đồ."""
+        old = theme.mode
+        new = theme.toggle()
+        theme.recolor(self.root, old, new)
+        self.menu.theme_btn.config(text=theme.label())
+        self.hud.theme_btn.config(text=theme.label())
+        self.draw()
+
     def toggle_pause(self):
         if not self.playing or self.over:
             return
@@ -163,15 +178,27 @@ class Game:
     def check_end(self):
         win = kinhte.check_win(self.buildings, self.res)
         if win:
-            self.finish(win)
+            self.finish(win, won=True)
         elif self.dark.lost():
-            self.finish("THUA CUỘC! Bóng tối đã nuốt chửng vùng đất.")
+            self.finish("THUA CUỘC! Bóng tối đã nuốt chửng vùng đất.", won=False)
 
-    def finish(self, msg):
+    def finish(self, msg, won=False):
         self.over = True
         self.hud.say(msg)
         self.refresh()
-        messagebox.showinfo("Stop the Darkness", msg)
+        if won:
+            score = scores.calc_score(self.turn, len(self.dark.cells),
+                                      len(self.buildings))
+            messagebox.showinfo("Stop the Darkness", f"{msg}\n\nĐiểm của bạn: {score}")
+            if scores.qualifies(score):
+                name = simpledialog.askstring(
+                    "Bảng xếp hạng", "Bạn vào top! Nhập tên (tối đa 12 ký tự):",
+                    parent=self.root)
+                rank = scores.add_score(name, score, self.turn)
+                if rank:
+                    messagebox.showinfo("Bảng xếp hạng", f"Bạn đứng hạng #{rank}!")
+        else:
+            messagebox.showinfo("Stop the Darkness", msg)
         self.back_to_menu()
 
     # ---------- giao diện
@@ -237,11 +264,14 @@ class Game:
     def draw(self):
         cv = self.canvas
         cv.delete("all")
+        cv.config(bg=theme.tint(GRASS))
         tw = kinhte.towers(self.buildings)
         k = CELL / SIZE  # tỉ lệ thu nhỏ sprite; làm tròn theo biên nên không hở đường nối
 
-        def paint(ox, oy, rects):
+        def paint(ox, oy, rects, tint=True):
             for x, y, w, h, col in rects:
+                if tint:
+                    col = theme.tint(col)
                 cv.create_rectangle(ox + round(x * k), oy + round(y * k),
                                     ox + round((x + w) * k), oy + round((y + h) * k),
                                     fill=col, outline=col)
@@ -255,7 +285,8 @@ class Game:
             paint(ox, oy, rects)
             name = self.buildings.get((r, c))
             if name:
-                paint(ox, oy, BUILD_SPRITES[name])
+                # Tower luôn sáng rực, không bị làm tối theo giao diện
+                paint(ox, oy, BUILD_SPRITES[name], tint=name != "Tower of Light")
             if self.playing and is_lit((r, c), tw):
                 cv.create_rectangle(ox + 2, oy + 2, ox + CELL - 2, oy + CELL - 2,
                                     outline="#ffe66d", width=2, dash=(4, 3))
