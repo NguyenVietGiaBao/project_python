@@ -1,12 +1,21 @@
 """Điểm vào của game. Chạy:  python main.py"""
+import random
 import tkinter as tk
 from tkinter import messagebox
 
 import kinhte
 from kinhte import BUILDINGS, BUILD_SPRITES, TECH_WIN, TOWERS_WIN, cost_text
 from dark import Darkness, RINGS, GRACE_TICKS, TICK_MS, is_lit
-from map import COLS, ROWS, SIZE, GRASS, TERRAIN_VI, generate_map
+from map import COLS, ROWS, SIZE, CELL, GRASS, TERRAIN_VI, generate_map
 from menu import PANEL, PANEL_W, MenuFrame, GamePanel, show_guide
+
+
+def pick_tutorial_tile(terrain):
+    """Chọn 1 ô rừng để mũi tên chỉ vào: ưu tiên ô xa rìa (bóng tối đến sau cùng)."""
+    forests = [p for p, t in terrain.items() if t == "forest"]
+    inner = [(r, c) for r, c in forests
+             if min(r, c, ROWS - 1 - r, COLS - 1 - c) >= 2]
+    return random.choice(inner or forests) if forests else None
 
 
 class Game:
@@ -22,13 +31,13 @@ class Game:
 
         frame = tk.Frame(root, bg="#000")
         frame.grid(row=0, column=0)
-        self.canvas = tk.Canvas(frame, width=COLS * SIZE, height=ROWS * SIZE,
+        self.canvas = tk.Canvas(frame, width=COLS * CELL, height=ROWS * CELL,
                                 bg=GRASS, highlightthickness=0)
         self.canvas.pack(padx=3, pady=3)
         self.canvas.bind("<Button-1>", self.on_click)
         self.canvas.bind("<Double-Button-1>", self.on_double_click)
 
-        self.panel = tk.Frame(root, bg=PANEL, width=PANEL_W, height=ROWS * SIZE + 6)
+        self.panel = tk.Frame(root, bg=PANEL, width=PANEL_W, height=ROWS * CELL + 6)
         self.panel.grid(row=0, column=1, sticky="ns")
         self.panel.pack_propagate(False)
         self.menu = MenuFrame(self.panel, self.play, self.regenerate,
@@ -40,7 +49,7 @@ class Game:
         for n in (1, 2, 3):
             root.bind(str(n), lambda e, n=n: self.set_speed(n))
         self.dark = Darkness()
-        self.terrain, self.sprites = generate_map()
+        self.terrain, self.sprites = generate_map(exact_center=True)
         self.reset_state()
         self.show_menu()
         self.draw()
@@ -75,10 +84,11 @@ class Game:
         self.draw()
 
     def play(self):
-        self.reset_state()
         self.playing = True
+        self.reset_state()
         self.show_game()
-        self.hud.say("Bóng tối sẽ tràn vào từ rìa bản đồ. Xây Lumber Camp trên rừng trước!")
+        # như game gốc: chọn sẵn 1 ô rừng (khung + mũi tên xanh chỉ vào ô đó)
+        self.selected = pick_tutorial_tile(self.terrain)
         self.refresh()
         self.schedule()
 
@@ -168,7 +178,7 @@ class Game:
     def on_click(self, event):
         if not self.playing or self.over:
             return
-        c, r = event.x // SIZE, event.y // SIZE
+        c, r = event.x // CELL, event.y // CELL
         if 0 <= r < ROWS and 0 <= c < COLS:
             self.selected = (r, c)
             self.refresh()
@@ -177,7 +187,7 @@ class Game:
         """Nhấp đúp vào ô: tự xây công trình đầu tiên xây được trên loại ô đó."""
         if not self.playing or self.over:
             return
-        c, r = event.x // SIZE, event.y // SIZE
+        c, r = event.x // CELL, event.y // CELL
         if not (0 <= r < ROWS and 0 <= c < COLS):
             return
         pos = (r, c)
@@ -200,11 +210,12 @@ class Game:
         if not self.playing:
             return
         d = self.dark
+        self.hud.set_resources(self.res, kinhte.income(
+            self.terrain, self.buildings, d.cells))
         self.hud.res_label.config(
             text=f"Nhịp {self.turn}" + ("  [TẠM DỪNG]" if self.paused else "") +
-                 f"\nGỗ {self.res['wood']}  Đá {self.res['stone']}  "
-                 f"Tech {self.res['tech']}/{TECH_WIN}\n"
-                 f"Tower {len(kinhte.towers(self.buildings))}/{TOWERS_WIN}  "
+                 f"\nTower {len(kinhte.towers(self.buildings))}/{TOWERS_WIN}"
+                 f"  Tech mục tiêu {TECH_WIN}\n"
                  f"Tối {len(d.cells)}/{ROWS * COLS}"
                  f"  Vòng {min(d.ring + 1, len(RINGS))}/{len(RINGS)}")
         self.hud.clear_buttons()
@@ -227,33 +238,40 @@ class Game:
         cv = self.canvas
         cv.delete("all")
         tw = kinhte.towers(self.buildings)
+        k = CELL / SIZE  # tỉ lệ thu nhỏ sprite; làm tròn theo biên nên không hở đường nối
+
+        def paint(ox, oy, rects):
+            for x, y, w, h, col in rects:
+                cv.create_rectangle(ox + round(x * k), oy + round(y * k),
+                                    ox + round((x + w) * k), oy + round((y + h) * k),
+                                    fill=col, outline=col)
+
         for (r, c), rects in self.sprites.items():
-            ox, oy = c * SIZE, r * SIZE
+            ox, oy = c * CELL, r * CELL
             if (r, c) in self.dark.cells:  # bị nuốt: đen kịt, xoá sạch hình bên dưới
-                cv.create_rectangle(ox, oy, ox + SIZE, oy + SIZE,
+                cv.create_rectangle(ox, oy, ox + CELL, oy + CELL,
                                     fill="#000000", outline="#000000")
                 continue
-            for x, y, w, h, col in rects:
-                cv.create_rectangle(ox + x, oy + y, ox + x + w, oy + y + h,
-                                    fill=col, outline=col)
+            paint(ox, oy, rects)
             name = self.buildings.get((r, c))
             if name:
-                for x, y, w, h, col in BUILD_SPRITES[name]:
-                    cv.create_rectangle(ox + x, oy + y, ox + x + w, oy + y + h,
-                                        fill=col, outline=col)
+                paint(ox, oy, BUILD_SPRITES[name])
             if self.playing and is_lit((r, c), tw):
-                cv.create_rectangle(ox + 2, oy + 2, ox + SIZE - 2, oy + SIZE - 2,
+                cv.create_rectangle(ox + 2, oy + 2, ox + CELL - 2, oy + CELL - 2,
                                     outline="#ffe66d", width=2, dash=(4, 3))
         if self.playing and not self.over:
             nxt = self.dark.current_cell()
             if nxt:
                 r, c = nxt
-                cv.create_rectangle(c * SIZE + 5, r * SIZE + 5, (c + 1) * SIZE - 5,
-                                    (r + 1) * SIZE - 5, outline="#b36bff", width=2)
+                cv.create_rectangle(c * CELL + 4, r * CELL + 4, (c + 1) * CELL - 4,
+                                    (r + 1) * CELL - 4, outline="#b36bff", width=2)
         if self.playing and self.selected:
             r, c = self.selected
-            cv.create_rectangle(c * SIZE + 2, r * SIZE + 2, (c + 1) * SIZE - 2,
-                                (r + 1) * SIZE - 2, outline="#ffffff", width=3)
+            cv.create_rectangle(c * CELL + 2, r * CELL + 2, (c + 1) * CELL - 2,
+                                (r + 1) * CELL - 2, outline="#1e90ff", width=3)
+            cx, top = c * CELL + CELL // 2, max(r * CELL - 2, 14)
+            cv.create_polygon(cx - 7, top - 12, cx + 7, top - 12, cx, top,
+                              fill="#1e90ff", outline="#0b5cad")
 
 
 if __name__ == "__main__":

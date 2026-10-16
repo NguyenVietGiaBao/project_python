@@ -1,7 +1,7 @@
 """Kinh tế: tài nguyên, công trình, chi phí, sản xuất, điều kiện xây."""
 from map import neighbors, rect, TERRAIN_VI
 
-RES_VI = {"wood": "Gỗ", "stone": "Đá", "tech": "Tech"}
+RES_VI = {"wood": "Gỗ", "stone": "Đá", "mana": "Mana", "tech": "Tech"}
 TECH_WIN = 60
 TOWERS_WIN = 2
 
@@ -15,8 +15,9 @@ BUILDINGS = {
                  "desc": "+1 tech/lượt. Cần Lumber Camp hoặc Quarry kề bên"},
     "Port": {"terrain": "grass", "cost": {"wood": 20}, "gives": {"tech": 2},
              "near_terrain": "water", "desc": "+2 tech/lượt. Cần nước kề bên"},
-    "Market": {"terrain": "village", "cost": {"wood": 20, "stone": 10},
-               "gives": {"tech": 1}, "desc": "+1 tech/lượt (làng cũng cho +1 gỗ/lượt)"},
+    "Market": {"terrain": "mushroom", "cost": {"wood": 20, "stone": 10},
+               "gives": {"tech": 1, "mana": 1},
+               "desc": "+1 tech, +1 mana/lượt (rừng nấm cũng cho +1 gỗ/lượt)"},
     "Tower of Light": {"terrain": "grass",
                        "cost": {"wood": 30, "stone": 20, "tech": 10}, "gives": {},
                        "near_building": ["Workshop"],
@@ -104,7 +105,7 @@ BUILD_SPRITES = {"Lumber Camp": _lumber(), "Quarry": _quarry(), "Workshop": _wor
 
 # ---------- luật kinh tế
 def new_resources():
-    return {"wood": 10, "stone": 0, "tech": 0}
+    return {"wood": 10, "stone": 0, "mana": 0, "tech": 0}
 
 
 def cost_text(cost):
@@ -144,14 +145,22 @@ def build(pos, name, buildings, res):
     buildings[pos] = name
 
 
-def produce(terrain, buildings, dark_cells, res):
-    """Mỗi nhịp: công trình sinh tài nguyên; làng chưa bị tối cho +1 gỗ."""
+def income(terrain, buildings, dark_cells):
+    """Tài nguyên thu được mỗi nhịp (hiện cạnh số trên HUD)."""
+    inc = {"wood": 0, "stone": 0, "mana": 0, "tech": 0}
     for name in buildings.values():
         for k, v in BUILDINGS[name]["gives"].items():
-            res[k] += v
+            inc[k] += v
     for p, t in terrain.items():
-        if t == "village" and p not in dark_cells:
-            res["wood"] += 1
+        if t == "mushroom" and p not in dark_cells:
+            inc["wood"] += 1
+    return inc
+
+
+def produce(terrain, buildings, dark_cells, res):
+    """Mỗi nhịp: công trình sinh tài nguyên; rừng nấm chưa bị tối cho +1 gỗ."""
+    for k, v in income(terrain, buildings, dark_cells).items():
+        res[k] += v
 
 
 def check_win(buildings, res):
