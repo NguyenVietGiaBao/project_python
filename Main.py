@@ -21,7 +21,7 @@ def pick_tutorial_tile(terrain):
 class Game:
     def __init__(self, root):
         self.root = root
-        root.title("Stop the Darkness (Python)")
+        root.title("Stop the Darkness Fake")
         root.configure(bg="#000")
         root.resizable(False, False)
         self.playing = False
