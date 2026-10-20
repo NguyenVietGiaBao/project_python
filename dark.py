@@ -7,6 +7,7 @@ GRACE_TICKS = 4    # số nhịp đầu tiên chưa có bóng tối
 DARK_EVERY = 8     # bóng tối tiến 1 lần sau mỗi bấy nhiêu nhịp (sản lượng tính theo phút nên phải chậm lại)
 STEP_EVERY = 50    # cứ sau bấy nhiêu lần tiến, bóng tối nuốt nhanh thêm 1 ô/lần (tối đa 3)
 LOSE_RATIO = 0.6
+TOWER_SLOW = 2     # có Tower of Light: bóng tối tiến chậm đi bấy nhiêu lần (DARK_EVERY x TOWER_SLOW nhịp)
 
 
 def ring_cells(k):
@@ -24,6 +25,11 @@ def ring_cells(k):
 
 
 RINGS = [ring_cells(k) for k in range(min(ROWS, COLS) // 2)]
+
+
+def dark_interval(tower_list):
+    """Số nhịp giữa hai lần bóng tối tiến. Có Tower thì chậm lại."""
+    return DARK_EVERY * (TOWER_SLOW if tower_list else 1)
 
 
 def is_lit(pos, tower_list):

@@ -7,7 +7,7 @@ import kinhte
 import scores
 import theme
 from kinhte import BUILD_SPRITES
-from dark import Darkness, GRACE_TICKS, TICK_MS, DARK_EVERY, is_lit
+from dark import Darkness, GRACE_TICKS, TICK_MS, dark_interval, is_lit
 from map import COLS, ROWS, SIZE, GRASS, TERRAIN_VI, generate_map
 from menu import PANEL_W, MenuFrame, GamePanel, show_guide, show_scores
 
@@ -83,6 +83,7 @@ class Game:
     def reset_state(self):
         """Đặt lại toàn bộ trạng thái mô phỏng, không tạo thêm bộ hẹn giờ."""
         self._cancel_timer()
+        kinhte.reset_terrain(self.terrain)   # ô Tower của ván trước trở về cỏ
         self.tiles = {}       # {(r, c): cấp} chỉ lưu ô đã nâng (cấp >= 2)
         self.counts = {}      # {(loại ô, cấp): số lần đã nâng lên cấp đó} -> giá tăng dần
         self.carry = kinhte.new_carry()  # phần lẻ tài nguyên chưa đủ 1 đơn vị
@@ -94,6 +95,8 @@ class Game:
         self.res = kinhte.new_resources()
         self.turn, self.selected, self.over = 1, None, False
         self.active_ticks = 0  # số nhịp mô phỏng kể từ khi xây công trình đầu tiên
+        self.dark_timer = 0    # số nhịp từ lần bóng tối tiến gần nhất
+        self.dark_moves = 0    # số lần bóng tối đã tiến (quyết định tốc độ nuốt)
         self.build_turn = None   # None = chưa bắt đầu; thời gian và bóng tối vẫn đứng yên
         self.hud.clear_log()
 
@@ -135,12 +138,15 @@ class Game:
             self.draw_overlay()
             self.refresh_info()
             return
-        name, lvl = kinhte.upgrade(pos, self.terrain, self.tiles, self.counts, self.res)
+        name, lvl = kinhte.upgrade(pos, self.terrain, self.tiles, self.counts, self.res,
+                                   self.dark.cells)
         started_simulation = self.build_turn is None
         if started_simulation:
             self.build_turn = self.turn
             self.hud.say("Bóng tối bắt đầu lan ra...")
         self.hud.say(f"{name} lên cấp {lvl}.")
+        if name == "Tower of Light":
+            self.hud.say("Tower of Light làm bóng tối tiến chậm lại.")
         # Tower mới có hiệu lực ngay: xua bóng tối trong vùng sáng và kiểm tra thắng
         cleared = self.dark.clear_lit(kinhte.towers(self.terrain, self.tiles))
         if cleared:
@@ -167,8 +173,12 @@ class Game:
         # Bóng tối tiến sau mỗi DARK_EVERY nhịp kể từ khi người chơi bắt đầu xây.
         # Trước đây elapsed == 0 cũng thỏa phép chia dư, khiến bóng tối xuất hiện ngay
         # ở nhịp đầu tiên, trái với mô tả luật chơi.
-        if self.active_ticks % DARK_EVERY == 0:
-            darkness_step = GRACE_TICKS + (self.active_ticks // DARK_EVERY) - 1
+        # Có Tower of Light thì khoảng cách giữa hai lần tiến dài hơn (dark_interval).
+        self.dark_timer += 1
+        if self.dark_timer >= dark_interval(tw):
+            self.dark_timer = 0
+            self.dark_moves += 1
+            darkness_step = GRACE_TICKS + self.dark_moves - 1
             for msg in self.dark.advance(darkness_step, tw, self.tiles):
                 self.hud.say(msg)
 
@@ -336,7 +346,7 @@ class Game:
             self.hud.show_tile(head, ["BỊ BÓNG TỐI NUỐT"])
             return
         now, next_title, nxt, warn = kinhte.describe(
-            pos, self.terrain, self.tiles, self.counts, self.res)
+            pos, self.terrain, self.tiles, self.counts, self.res, self.dark.cells)
         self.hud.show_tile(head, now, next_title, nxt, warn)
 
     def draw(self):
@@ -363,7 +373,7 @@ class Game:
             paint(ox, oy, rects)
             lvl = self.tiles.get((r, c), 1)
             if lvl >= 2:
-                sp = kinhte.level_info(self.terrain[(r, c)], lvl)["sprite"]
+                sp = kinhte.level_at((r, c), self.terrain, lvl)["sprite"]
                 if sp:
                     # Tower luôn sáng rực, không bị làm tối theo giao diện
                     paint(ox, oy, BUILD_SPRITES[sp], tint=sp != "Tower of Light")

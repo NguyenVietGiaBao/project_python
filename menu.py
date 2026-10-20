@@ -1,8 +1,8 @@
 """Giao diện: màu/font, nút, màn hình menu và bảng điều khiển khi chơi."""
 import tkinter as tk
 
-from kinhte import TECH_WIN, TOWERS_WIN, CHAINS, effect_text
-from dark import TICK_MS, DARK_EVERY, LOSE_RATIO
+from kinhte import CIRCLE_COST, CHAINS, cost_text, effect_text
+from dark import TICK_MS, DARK_EVERY, LOSE_RATIO, TOWER_SLOW
 from map import TERRAIN_VI
 import scores
 import theme
@@ -116,16 +116,18 @@ ICONS = {k: _art_to_rects(*v) for k, v in ICON_ART.items()}
 def _levels_text():
     """Liệt kê các cấp nâng được, lấy thẳng từ bảng CHAINS trong kinhte.py."""
     out = []
-    for kind in ("forest", "rock", "grass", "mushroom"):
+    labels = {"grass_magic": "ô cỏ kề rừng nấm",
+              "grass_tower": "ô cỏ kề Magic Workshop cấp 2, chỉ xây được 1"}
+    for kind in ("forest", "rock", "grass", "grass_magic", "mushroom", "grass_tower", "circle"):
+        where = labels.get(kind) or f"ô {TERRAIN_VI[kind]}"
         for i, lv in enumerate(CHAINS[kind], 1):
             if i >= 2:
-                out.append(f"- {lv['name']} (cấp {i}, trên ô {TERRAIN_VI[kind]}): "
-                           f"{effect_text(lv)}")
+                out.append(f"- {lv['name']} (cấp {i}, trên {where}): {effect_text(lv)}")
     return "\n".join(out)
 
 
 GUIDE = f"""MỤC TIÊU
-- Thắng khi có {TOWERS_WIN} Tower of Light HOẶC đạt {TECH_WIN} Tech.
+- Thắng khi nâng cấp VÒNG ĐÁ giữa bản đồ (chi phí {cost_text(CIRCLE_COST)}).
 - Thua khi bóng tối nuốt hơn {int(LOSE_RATIO * 100)}% bản đồ.
 
 CÁCH CHƠI
@@ -142,7 +144,8 @@ BÓNG TỐI
 - Tràn vào từ rìa bản đồ, đi theo vòng từ ngoài vào trong.
 - Cứ {DARK_EVERY} nhịp tiến 1 lần (mỗi nhịp {TICK_MS / 1000:g} giây).
 - Khung tím trên bản đồ là ô sắp bị nuốt. Ô đã nâng cấp bị nuốt sẽ mất.
-- Tower of Light soi sáng bán kính 2 ô: bóng tối không vào được vùng đó.
+- Tower of Light soi sáng bán kính 2 ô (bóng tối không vào được) và làm bóng tối
+  tiến chậm gấp {TOWER_SLOW} lần. Tower KHÔNG giúp thắng game.
 
 CÁC CẤP (sản lượng tính theo phút)
 {_levels_text()}
@@ -207,8 +210,8 @@ class MenuFrame:
         box.pack(fill="x")
         tk.Label(box, text="Standard", font=("Courier New", 15, "bold"), bg=theme.c("box"),
                  fg=theme.c("ink"), anchor="w").pack(fill="x", padx=6, pady=(4, 0))
-        tk.Label(box, text=f"Ngắn gọn, không quá khó. Thắng bằng {TOWERS_WIN} Tower of "
-                           f"Light hoặc {TECH_WIN} Tech.", font=SMALL, bg=theme.c("box"), fg=theme.c("ink"),
+        tk.Label(box, text=f"Ngắn gọn, không quá khó. Thắng bằng cách nâng cấp "
+                           f"vòng đá giữa bản đồ ({cost_text(CIRCLE_COST)}).", font=SMALL, bg=theme.c("box"), fg=theme.c("ink"),
                  anchor="w", justify="left", wraplength=265).pack(fill="x", padx=6,
                                                                  pady=(0, 6))
         box2 = tk.Frame(m, bg=theme.c("box_off"), bd=2, relief="solid")
