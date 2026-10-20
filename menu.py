@@ -1,8 +1,9 @@
 """Giao diện: màu/font, nút, màn hình menu và bảng điều khiển khi chơi."""
 import tkinter as tk
 
-from kinhte import TECH_WIN, TOWERS_WIN
-from dark import GRACE_TICKS, TICK_MS, LOSE_RATIO
+from kinhte import TECH_WIN, TOWERS_WIN, CHAINS, effect_text
+from dark import TICK_MS, DARK_EVERY, LOSE_RATIO
+from map import TERRAIN_VI
 import scores
 import theme
 
@@ -112,44 +113,45 @@ def _art_to_rects(art, palette):
 ICONS = {k: _art_to_rects(*v) for k, v in ICON_ART.items()}
 
 
+def _levels_text():
+    """Liệt kê các cấp nâng được, lấy thẳng từ bảng CHAINS trong kinhte.py."""
+    out = []
+    for kind in ("forest", "rock", "grass", "mushroom"):
+        for i, lv in enumerate(CHAINS[kind], 1):
+            if i >= 2:
+                out.append(f"- {lv['name']} (cấp {i}, trên ô {TERRAIN_VI[kind]}): "
+                           f"{effect_text(lv)}")
+    return "\n".join(out)
+
+
 GUIDE = f"""MỤC TIÊU
 - Thắng khi có {TOWERS_WIN} Tower of Light HOẶC đạt {TECH_WIN} Tech.
 - Thua khi bóng tối nuốt hơn {int(LOSE_RATIO * 100)}% bản đồ.
 
-BÓNG TỐI
-- Tràn vào từ rìa bản đồ, đi theo vòng từ ngoài vào trong.
-- {GRACE_TICKS} nhịp đầu chưa có bóng tối. Mỗi nhịp dài {TICK_MS / 1000:g} giây.
-- Càng về sau bóng tối càng nhanh (tối đa 3 ô/nhịp).
-- Khung tím trên bản đồ là ô sắp bị nuốt. Công trình trên ô bị nuốt sẽ bị phá huỷ.
-
 CÁCH CHƠI
-- Bấm 1 lần vào ô để chọn, rồi bấm nút công trình bên phải.
-- Nhấp đúp vào ô để xây nhanh công trình phù hợp.
+- Rê chuột vào ô để xem thông tin, BẤM vào ô để nâng cấp.
+- Khung bên phải cho biết ô hiện tại, chi phí nâng lên cấp kế tiếp và
+  sản lượng ở cấp đó.
+- Mọi thứ đứng yên cho đến khi bạn nâng cấp ô đầu tiên.
+- Giá tăng dần: mỗi lần nâng một ô lên cùng một cấp, lần sau đắt hơn lần trước.
 - Space: tạm dừng / tiếp tục.
 - Phím T hoặc nút Giao diện: đổi sáng / tối (được nhớ cho lần sau).
-- Góc dưới panel: nút II tạm dừng, nút \u25b6 đổi tốc độ x1 / x2 / x3 (hoặc
-  bấm phím 1, 2, 3). Tốc độ cao làm cả tài nguyên và bóng tối chạy nhanh hơn.
+- Nút II tạm dừng, nút \u25b6 đổi tốc độ x1 / x2 / x3 (hoặc phím 1, 2, 3).
 
-CÔNG TRÌNH
-- Lumber Camp (con thỏ): xây trên rừng, +2 gỗ/nhịp.
-- Quarry: xây trên đá, +2 đá/nhịp.
-- Workshop: xây trên cỏ, kề Lumber Camp hoặc Quarry, +1 tech/nhịp.
-- Port: xây trên cỏ, kề nước, +2 tech/nhịp.
-- Market: xây trên rừng nấm, +1 tech và +1 mana/nhịp.
-- Tower of Light: xây trên cỏ, kề Workshop. Soi sáng bán kính 2 ô,
-  bóng tối không nuốt được vùng này và các ô tối trong đó bị xua tan.
-- Mỗi rừng nấm chưa bị tối cho +1 gỗ/nhịp.
+BÓNG TỐI
+- Tràn vào từ rìa bản đồ, đi theo vòng từ ngoài vào trong.
+- Cứ {DARK_EVERY} nhịp tiến 1 lần (mỗi nhịp {TICK_MS / 1000:g} giây).
+- Khung tím trên bản đồ là ô sắp bị nuốt. Ô đã nâng cấp bị nuốt sẽ mất.
+- Tower of Light soi sáng bán kính 2 ô: bóng tối không vào được vùng đó.
+
+CÁC CẤP (sản lượng tính theo phút)
+{_levels_text()}
 
 ĐIỂM (chỉ ván thắng mới được ghi vào bảng xếp hạng)
 - Cơ bản {scores.WIN_BONUS} điểm khi thắng.
 - Thưởng thời gian: tối đa {scores.TIME_MAX}, mỗi nhịp trừ {scores.TIME_PER_TICK}.
-- Mỗi ô chưa bị tối +{scores.DARK_PT}, mỗi công trình còn sống +{scores.BUILD_PT}.
+- Mỗi ô chưa bị tối +{scores.DARK_PT}, mỗi ô đã nâng cấp còn sống +{scores.BUILD_PT}.
 - Bảng lưu {scores.MAX_ENTRIES} điểm cao nhất (file scores.json).
-
-MẸO
-- Xây Lumber Camp trên rừng đầu tiên, rồi Quarry và Workshop.
-- Vòng đá nằm gần giữa bản đồ (chưa có công dụng, sẽ dùng cho bản sau).
-- Đặt Tower gần vòng ngoài để chắn bóng tối và bảo vệ công trình.
 """
 
 
@@ -232,63 +234,14 @@ class MenuFrame:
         self.theme_btn.pack(side="left", padx=(4, 0))
 
 
-# class GamePanel:
-#     def __init__(self, parent, on_pause, on_quit, on_speed):
-#         g = self.frame = tk.Frame(parent, bg=PANEL)
-#         # HUD tài nguyên 2x2: icon, số lượng, mức thu mỗi nhịp
-#         hud = tk.Frame(g, bg=PANEL)
-#         hud.pack(fill="x")
-#         hud.columnconfigure((0, 1), weight=1, uniform="res")
-#         self.cells = {}
-#         for i, key in enumerate(RES_ORDER):
-#             cell = tk.Frame(hud, bg=BOX, bd=2, relief="solid")
-#             cell.grid(row=i // 2, column=i % 2, sticky="ew", padx=1, pady=1)
-#             icon = tk.Canvas(cell, width=32, height=32, bg=BOX, highlightthickness=0)
-#             icon.pack(side="left", padx=(3, 0))
-#             for x, y, w, h, col in ICONS[key]:
-#                 icon.create_rectangle(x * 2, y * 2, (x + w) * 2, (y + h) * 2,
-#                                       fill=col, outline=col)
-#             val = tk.Label(cell, font=("Courier New", 16, "bold"), bg=BOX, fg=INK,
-#                            anchor="w")
-#             val.pack(side="left", padx=2)
-#             inc = tk.Label(cell, font=SMALL, bg=BOX, fg="#777", anchor="e")
-#             inc.pack(side="right", padx=3, anchor="s")
-#             self.cells[key] = (val, inc)
-#         self.res_label = tk.Label(g, font=SMALL, bg=PANEL, fg=INK, justify="left",
-#                                   anchor="w")
-#         self.res_label.pack(fill="x", pady=(6, 0))
-#         self.info_label = tk.Label(g, font=SMALL, bg=PANEL, fg=INK, justify="left",
-#                                    anchor="w", wraplength=285)
-#         self.info_label.pack(fill="x", pady=(6, 4))
-#         self.btn_frame = tk.Frame(g, bg=PANEL)
-#         self.btn_frame.pack(fill="x")
-#         tk.Frame(g, bg=PANEL, height=8).pack()
-#         mkbtn(g, "Bỏ ván / về menu", on_quit, font=SMALL).pack(fill="x")
-#         bar = tk.Frame(g, bg=PANEL)
-#         bar.pack(side="bottom", fill="x", pady=(6, 0))
-#         self.speed_label = tk.Label(bar, font=SMALL, bg=PANEL, fg=INK, anchor="w")
-#         self.speed_label.pack(fill="x")
-#         row = tk.Frame(bar, bg=PANEL)
-#         row.pack(fill="x")
-#         self.pause_btn = mkbtn(row, "II", on_pause, font=FONT, width=3)
-#         self.pause_btn.pack(side="left")
-#         self.speed_btn = mkbtn(row, "", on_speed, font=FONT, width=4)
-#         self.speed_btn.pack(side="left", padx=(4, 0))
-#         self.set_speed(1)
-#         # nhật ký sự kiện nằm trong panel (cửa sổ giữ nguyên kích thước như menu)
-#         self.log = tk.Text(g, height=6, bg=BOX, fg=INK, font=SMALL, state="disabled",
-#                            wrap="word", relief="solid", bd=2)
-#         self.log.pack(fill="both", expand=True, pady=(8, 0))
-
 class GamePanel:
     def __init__(self, parent, on_pause, on_quit, on_speed, on_theme):
         g = self.frame = tk.Frame(parent, bg=theme.c("panel"))
-        # HUD tài nguyên 2x2: icon, số lượng, mức thu mỗi nhịp
+        # HUD tài nguyên 2x2: icon, số lượng, mức thu mỗi phút
         hud = tk.Frame(g, bg=theme.c("panel"))
         hud.pack(fill="x")
         self.cells = {}
         for i, key in enumerate(RES_ORDER):
-            # Cố định kích thước khung chứa tài nguyên với width và height, đồng thời bật pack_propagate(False)
             cell = tk.Frame(hud, bg=theme.c("box"), bd=2, relief="solid", width=145, height=45)
             cell.grid(row=i // 2, column=i % 2, padx=1, pady=1)
             cell.pack_propagate(False)
@@ -304,16 +257,8 @@ class GamePanel:
             inc = tk.Label(cell, font=SMALL, bg=theme.c("box"), fg=theme.c("faint"), anchor="e")
             inc.pack(side="right", padx=3, anchor="s")
             self.cells[key] = (val, inc)
-        self.res_label = tk.Label(g, font=SMALL, bg=theme.c("panel"), fg=theme.c("ink"), justify="left",
-                                  anchor="w")
-        self.res_label.pack(fill="x", pady=(6, 0))
-        self.info_label = tk.Label(g, font=SMALL, bg=theme.c("panel"), fg=theme.c("ink"), justify="left",
-                                   anchor="w", wraplength=285)
-        self.info_label.pack(fill="x", pady=(6, 4))
-        self.btn_frame = tk.Frame(g, bg=theme.c("panel"))
-        self.btn_frame.pack(fill="x")
-        tk.Frame(g, bg=theme.c("panel"), height=8).pack()
-        mkbtn(g, "Bỏ ván / về menu", on_quit, font=SMALL).pack(fill="x")
+
+        # thanh dưới cùng: tốc độ + 1 hàng nút (pack trước để luôn nằm đáy)
         bar = tk.Frame(g, bg=theme.c("panel"))
         bar.pack(side="bottom", fill="x", pady=(6, 0))
         self.speed_label = tk.Label(bar, font=SMALL, bg=theme.c("panel"), fg=theme.c("ink"), anchor="w")
@@ -324,29 +269,62 @@ class GamePanel:
         self.pause_btn.pack(side="left")
         self.speed_btn = mkbtn(row, "", on_speed, font=FONT, width=4)
         self.speed_btn.pack(side="left", padx=(4, 0))
+        mkbtn(row, "Về menu", on_quit, font=SMALL).pack(
+            side="left", fill="x", expand=True, padx=(4, 0))
         self.theme_btn = mkbtn(row, theme.label(), on_theme, font=SMALL, width=15)
         self.theme_btn.pack(side="left", padx=(4, 0))
         self.set_speed(1)
-        # nhật ký sự kiện nằm trong panel (cửa sổ giữ nguyên kích thước như menu)
-        self.log = tk.Text(g, height=6, bg=theme.c("box"), fg=theme.c("ink"), font=SMALL, state="disabled",
-                           wrap="word", relief="solid", bd=2)
-        self.log.pack(fill="both", expand=True, pady=(8, 0))
+
+        # MỘT khung duy nhất: thông tin ô (trên), thông báo gần nhất (dưới)
+        self.info = tk.Frame(g, bg=theme.c("box"), bd=2, relief="solid")
+        self.info.pack(fill="both", expand=True, pady=(8, 0))
+        self.msgs = []
+        self.msg_label = tk.Label(self.info, font=("Courier New", 8, "bold"), bg=theme.c("box"),
+                                  fg=theme.c("muted"), justify="left", anchor="nw",
+                                  wraplength=270, height=3)
+        self.msg_label.pack(side="bottom", fill="x", padx=6, pady=(0, 4))
+        tk.Frame(self.info, bg=theme.c("ink"), height=2).pack(side="bottom", fill="x",
+                                                               padx=4, pady=(0, 4))
+        self.tile = tk.Frame(self.info, bg=theme.c("box"))
+        self.tile.pack(side="top", fill="both", expand=True)
 
     def set_resources(self, res, inc):
         for key, (val, lbl) in self.cells.items():
             val.config(text=str(res[key]))
-            lbl.config(text=f"+{inc.get(key, 0)}")
+            lbl.config(text=f"+{inc.get(key, 0):g}/ph")
+
+    def show_tile(self, head, now=(), next_title="", nxt=(), warn=""):
+        """Vẽ lại khung thông tin ô (chỉ để đọc, không có nút).
+        head: tên ô. now: các dòng về cấp hiện tại.
+        next_title + nxt: cấp kế tiếp (chi phí, sản lượng), sau một gạch ngang.
+        warn: lý do chưa nâng được (chữ đỏ)."""
+        for w in self.tile.winfo_children():
+            w.destroy()
+        box, ink = theme.c("box"), theme.c("ink")
+
+        def line(text, font, fg, pady=(0, 0)):
+            tk.Label(self.tile, text=text, font=font, bg=box, fg=fg, justify="left",
+                     anchor="w", wraplength=270).pack(fill="x", padx=6, pady=pady)
+
+        line(head, FONT, ink, pady=(4, 4))
+        for text in now:
+            line(text, SMALL, ink, pady=(0, 2))
+        if next_title:
+            tk.Frame(self.tile, bg=ink, height=2).pack(fill="x", padx=4, pady=(8, 6))
+            line(next_title, SMALL, ink, pady=(0, 2))
+            for text in nxt:
+                line(text, SMALL, theme.c("text2"), pady=(0, 2))
+        if warn:
+            line(f"! {warn}", SMALL, theme.c("warn"), pady=(6, 0))
 
     def say(self, text):
-        self.log.configure(state="normal")
-        self.log.insert("end", text + "\n")
-        self.log.see("end")
-        self.log.configure(state="disabled")
+        """Hiện 3 thông báo gần nhất ở cuối khung."""
+        self.msgs = (self.msgs + [text])[-3:]
+        self.msg_label.config(text="\n".join(self.msgs))
 
     def clear_log(self):
-        self.log.configure(state="normal")
-        self.log.delete("1.0", "end")
-        self.log.configure(state="disabled")
+        self.msgs = []
+        self.msg_label.config(text="")
 
     def set_speed(self, speed):
         self.speed_label.config(text=f"Game Speed: {speed}")
@@ -354,17 +332,3 @@ class GamePanel:
 
     def set_paused(self, paused):
         self.pause_btn.config(text="\u25b6" if paused else "II")
-
-    def clear_buttons(self):
-        for w in self.btn_frame.winfo_children():
-            w.destroy()
-
-    def add_build_row(self, label, cmd, enabled, desc, reason):
-        row = tk.Frame(self.btn_frame, bg=theme.c("panel"))
-        row.pack(fill="x", pady=2)
-        mkbtn(row, label, cmd, state="normal" if enabled else "disabled",
-              font=SMALL, wraplength=275).pack(fill="x")
-        tk.Label(row, text=desc if enabled else f"{desc}\n! {reason}",
-                 font=("Courier New", 8, "bold"), bg=theme.c("panel"),
-                 fg=theme.c("text2") if enabled else theme.c("warn"), justify="left", anchor="w",
-                 wraplength=285).pack(fill="x")

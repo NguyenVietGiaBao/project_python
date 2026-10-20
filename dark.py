@@ -4,7 +4,8 @@ from map import ROWS, COLS
 LIGHT_RADIUS = 2
 TICK_MS = 1500     # mỗi nhịp (ms): sản xuất tài nguyên + bóng tối tiến lên
 GRACE_TICKS = 4    # số nhịp đầu tiên chưa có bóng tối
-STEP_EVERY = 50    # cứ sau bấy nhiêu nhịp, bóng tối nhanh thêm 1 ô/nhịp (tối đa 3)
+DARK_EVERY = 8     # bóng tối tiến 1 lần sau mỗi bấy nhiêu nhịp (sản lượng tính theo phút nên phải chậm lại)
+STEP_EVERY = 50    # cứ sau bấy nhiêu lần tiến, bóng tối nuốt nhanh thêm 1 ô/lần (tối đa 3)
 LOSE_RATIO = 0.6
 
 
@@ -50,9 +51,9 @@ class Darkness:
             return RINGS[self.ring][self.idx]
         return None
 
-    def advance(self, turn, tower_list, buildings):
+    def advance(self, turn, tower_list, tiles):
         """Bóng tối tiến theo chiều kim đồng hồ dọc từng vòng, từ ngoài vào trong.
-        Có thể xoá công trình khỏi `buildings`. Trả về danh sách thông báo."""
+        Có thể xoá ô đã nâng cấp khỏi `tiles` ({vị trí: cấp}). Trả về danh sách thông báo."""
         msgs = []
         steps = min(1 + (turn - GRACE_TICKS) // STEP_EVERY, 3)
         while steps > 0 and self.ring < len(RINGS):
@@ -69,9 +70,9 @@ class Darkness:
                 continue
             self.cells.add(pos)
             steps -= 1
-            if pos in buildings:
-                msgs.append(f"{buildings[pos]} bị bóng tối phá huỷ!")
-                del buildings[pos]
+            if pos in tiles:
+                msgs.append(f"Ô nâng cấp ({pos[0]},{pos[1]}) bị bóng tối phá huỷ!")
+                del tiles[pos]
         return msgs
 
     def lost(self):
