@@ -8,8 +8,13 @@ import scores
 import theme
 from kinhte import BUILD_SPRITES
 from dark import Darkness, GRACE_TICKS, TICK_MS, DARK_EVERY, is_lit
-from map import COLS, ROWS, SIZE, CELL, GRASS, TERRAIN_VI, generate_map
+from map import COLS, ROWS, SIZE, GRASS, TERRAIN_VI, generate_map
 from menu import PANEL_W, MenuFrame, GamePanel, show_guide, show_scores
+
+
+# Sprite của bản đồ được thiết kế trên lưới 54 px; giữ nguyên kích thước pixel-art
+# thay vì thu nhỏ còn 44 px để hiển thị sắc nét và gần tỉ lệ game gốc hơn.
+VIEW_CELL = SIZE
 
 
 def pick_tutorial_tile(terrain):
@@ -30,16 +35,20 @@ class Game:
         self.paused = False
         self.speed = 1
         self.after_id = None
+        self._closed = False
+
+        # Dọn bộ hẹn giờ trước khi đóng để tránh callback gọi vào cửa sổ đã hủy.
+        root.protocol("WM_DELETE_WINDOW", self.close)
 
         frame = tk.Frame(root, bg="#000")
         frame.grid(row=0, column=0)
-        self.canvas = tk.Canvas(frame, width=COLS * CELL, height=ROWS * CELL,
+        self.canvas = tk.Canvas(frame, width=COLS * VIEW_CELL, height=ROWS * VIEW_CELL,
                                 bg=GRASS, highlightthickness=0)
         self.canvas.pack(padx=3, pady=3)
         self.canvas.bind("<Button-1>", self.on_click)    # bấm vào ô = nâng cấp ô đó
         self.canvas.bind("<Motion>", self.on_motion)     # rê chuột = xem thông tin ô
 
-        self.panel = tk.Frame(root, bg=theme.c("panel"), width=PANEL_W, height=ROWS * CELL + 6)
+        self.panel = tk.Frame(root, bg=theme.c("panel"), width=PANEL_W, height=ROWS * VIEW_CELL + 6)
         self.panel.grid(row=0, column=1, sticky="ns")
         self.panel.pack_propagate(False)
         self.menu = MenuFrame(self.panel, self.play, self.regenerate,
@@ -52,6 +61,7 @@ class Game:
 
         root.bind("<space>", lambda e: self.toggle_pause())
         root.bind("<t>", lambda e: self.toggle_theme())
+        root.bind("<F1>", lambda e: show_guide(self.root))
         for n in (1, 2, 3):
             root.bind(str(n), lambda e, n=n: self.set_speed(n))
         self.dark = Darkness()
@@ -71,6 +81,8 @@ class Game:
 
     # ---------- trạng thái ván chơi
     def reset_state(self):
+        """Đặt lại toàn bộ trạng thái mô phỏng, không tạo thêm bộ hẹn giờ."""
+        self._cancel_timer()
         self.tiles = {}       # {(r, c): cấp} chỉ lưu ô đã nâng (cấp >= 2)
         self.counts = {}      # {(loại ô, cấp): số lần đã nâng lên cấp đó} -> giá tăng dần
         self.carry = kinhte.new_carry()  # phần lẻ tài nguyên chưa đủ 1 đơn vị
@@ -81,7 +93,8 @@ class Game:
         self.hud.set_speed(1)
         self.res = kinhte.new_resources()
         self.turn, self.selected, self.over = 1, None, False
-        self.build_turn = None   # nhịp nâng cấp đầu tiên (None = chưa bắt đầu, mọi thứ đứng yên)
+        self.active_ticks = 0  # số nhịp mô phỏng kể từ khi xây công trình đầu tiên
+        self.build_turn = None   # None = chưa bắt đầu; thời gian và bóng tối vẫn đứng yên
         self.hud.clear_log()
 
     def new_map(self):
@@ -93,6 +106,7 @@ class Game:
         self.draw()
 
     def play(self):
+        self._cancel_timer()
         self.playing = True
         self.reset_state()
         self.show_game()
@@ -102,10 +116,8 @@ class Game:
         self.schedule()
 
     def back_to_menu(self):
+        self._cancel_timer()
         self.playing = False
-        if self.after_id is not None:
-            self.root.after_cancel(self.after_id)
-            self.after_id = None
         self.new_map()
         self.reset_state()
         self.show_menu()
@@ -114,7 +126,7 @@ class Game:
     # ---------- luật chơi
     def upgrade(self, pos):
         """Bấm vào ô: nâng lên cấp kế tiếp nếu đủ điều kiện, không thì báo lý do."""
-        if not self.playing or self.over:
+        if not self.playing or self.over or pos not in self.terrain:
             return
         ok, reason = kinhte.can_upgrade(pos, self.terrain, self.tiles, self.counts,
                                         self.dark.cells, self.res, self.over)
@@ -124,7 +136,8 @@ class Game:
             self.refresh_info()
             return
         name, lvl = kinhte.upgrade(pos, self.terrain, self.tiles, self.counts, self.res)
-        if self.build_turn is None:
+        started_simulation = self.build_turn is None
+        if started_simulation:
             self.build_turn = self.turn
             self.hud.say("Bóng tối bắt đầu lan ra...")
         self.hud.say(f"{name} lên cấp {lvl}.")
@@ -133,49 +146,80 @@ class Game:
         if cleared:
             self.hud.say(f"Ánh sáng xua tan {cleared} ô bóng tối.")
         self.check_end()
-        if not self.over:
+        if self.playing and not self.over:
             self.refresh()
+            if started_simulation and not self.paused:
+                self.schedule()
 
     def end_turn(self):
-        if self.over or not self.playing:
+        """Chạy một nhịp mô phỏng: sản xuất, chiếu sáng, lan bóng tối, kiểm tra kết thúc."""
+        if self.over or not self.playing or self.paused or self.build_turn is None:
+            # Không xây gì thì game đứng yên; khi tạm dừng cũng không xử lý nhịp.
             return
-        if self.build_turn is None:
-            # chưa nâng cấp gì: mọi thứ đứng yên (không sản xuất, không bóng tối, không tính nhịp)
-            return
+
+        self.active_ticks += 1
         kinhte.produce(self.terrain, self.tiles, self.dark.cells, self.res, self.carry)
         tw = kinhte.towers(self.terrain, self.tiles)
         cleared = self.dark.clear_lit(tw)
         if cleared:
             self.hud.say(f"Ánh sáng xua tan {cleared} ô bóng tối.")
-        # bóng tối chỉ tiến 1 lần sau mỗi DARK_EVERY nhịp, kể từ lúc nâng cấp đầu tiên
-        elapsed = self.turn - self.build_turn
-        if elapsed % DARK_EVERY == 0:
-            for msg in self.dark.advance(GRACE_TICKS + elapsed // DARK_EVERY, tw, self.tiles):
+
+        # Bóng tối tiến sau mỗi DARK_EVERY nhịp kể từ khi người chơi bắt đầu xây.
+        # Trước đây elapsed == 0 cũng thỏa phép chia dư, khiến bóng tối xuất hiện ngay
+        # ở nhịp đầu tiên, trái với mô tả luật chơi.
+        if self.active_ticks % DARK_EVERY == 0:
+            darkness_step = GRACE_TICKS + (self.active_ticks // DARK_EVERY) - 1
+            for msg in self.dark.advance(darkness_step, tw, self.tiles):
                 self.hud.say(msg)
+
         self.turn += 1
         self.check_end()
-        if not self.over:
+        if self.playing and not self.over:
             self.refresh()
 
-    def schedule(self):
+    def _cancel_timer(self):
+        """Hủy callback đang chờ một cách an toàn; có thể gọi nhiều lần."""
         if self.after_id is not None:
-            self.root.after_cancel(self.after_id)
-        self.after_id = self.root.after(TICK_MS // self.speed, self.on_timer)
+            try:
+                self.root.after_cancel(self.after_id)
+            except tk.TclError:
+                # Cửa sổ có thể đã đóng hoặc callback vừa được Tk lấy khỏi hàng đợi.
+                pass
+            finally:
+                self.after_id = None
+
+    def schedule(self):
+        """Chỉ duy trì một bộ hẹn giờ khi game đang thực sự chạy."""
+        self._cancel_timer()
+        if self._closed or not self.playing or self.over or self.paused or self.build_turn is None:
+            return
+        delay = max(1, int(TICK_MS / self.speed))
+        self.after_id = self.root.after(delay, self.on_timer)
 
     def on_timer(self):
+        # Callback đã được lấy khỏi hàng đợi nên không còn ID đang chờ.
         self.after_id = None
+        if self._closed:
+            return
         if self.playing and not self.over and not self.paused:
             self.end_turn()
-        if self.playing and not self.over:
+        if self.playing and not self.over and not self.paused:
             self.schedule()
 
     def set_speed(self, speed):
-        """Đổi tốc độ x1/x2/x3: nhịp ngắn lại, tài nguyên và bóng tối nhanh theo."""
+        """Đổi tốc độ x1/x2/x3; chỉ thay nhịp thời gian, không tạo timer trùng."""
         if not self.playing or self.over:
+            return
+        try:
+            speed = int(speed)
+        except (TypeError, ValueError):
+            return
+        if speed not in (1, 2, 3):
             return
         self.speed = speed
         self.hud.set_speed(speed)
-        self.schedule()
+        if not self.paused:
+            self.schedule()
 
     def toggle_theme(self):
         """Đổi giao diện sáng/tối: tô lại panel, các cửa sổ phụ và vẽ lại bản đồ."""
@@ -193,8 +237,15 @@ class Game:
             return
         self.paused = not self.paused
         self.hud.set_paused(self.paused)
+        if self.paused:
+            # Dừng hẳn timer để tránh callback lặp vô ích trong lúc tạm dừng.
+            self._cancel_timer()
+        else:
+            self.schedule()
 
     def check_end(self):
+        if self.over:
+            return
         win = kinhte.check_win(self.terrain, self.tiles, self.res)
         if win:
             self.finish(win, won=True)
@@ -202,26 +253,44 @@ class Game:
             self.finish("THUA CUỘC! Bóng tối đã nuốt chửng vùng đất.", won=False)
 
     def finish(self, msg, won=False):
+        if self.over:
+            return
         self.over = True
+        self._cancel_timer()
         self.hud.say(msg)
         self.refresh()
         if won:
             score = scores.calc_score(self.turn, len(self.dark.cells), len(self.tiles))
-            messagebox.showinfo("Stop the Darkness", f"{msg}\n\nĐiểm của bạn: {score}")
+            messagebox.showinfo("Stop the Darkness", f"{msg}\n\nĐiểm của bạn: {score}", parent=self.root)
             if scores.qualifies(score):
                 name = simpledialog.askstring(
                     "Bảng xếp hạng", "Bạn vào top! Nhập tên (tối đa 12 ký tự):",
                     parent=self.root)
-                rank = scores.add_score(name, score, self.turn)
-                if rank:
-                    messagebox.showinfo("Bảng xếp hạng", f"Bạn đứng hạng #{rank}!")
+                # Hủy hộp thoại thì bỏ qua việc ghi tên; nhập chuỗi rỗng vẫn có thể là Ẩn danh.
+                if name is not None:
+                    rank = scores.add_score(name, score, self.turn)
+                    if rank:
+                        messagebox.showinfo("Bảng xếp hạng", f"Bạn đứng hạng #{rank}!", parent=self.root)
         else:
-            messagebox.showinfo("Stop the Darkness", msg)
-        self.back_to_menu()
+            messagebox.showinfo("Stop the Darkness", msg, parent=self.root)
+        if not self._closed:
+            self.back_to_menu()
+
+    def close(self):
+        """Đóng cửa sổ sau khi hủy callback, tránh tác vụ nền chạy sót."""
+        if self._closed:
+            return
+        self._closed = True
+        self.playing = False
+        self._cancel_timer()
+        try:
+            self.root.destroy()
+        except tk.TclError:
+            pass
 
     # ---------- giao diện
     def cell_at(self, event):
-        c, r = event.x // CELL, event.y // CELL
+        c, r = event.x // VIEW_CELL, event.y // VIEW_CELL
         return (r, c) if 0 <= r < ROWS and 0 <= c < COLS else None
 
     def on_motion(self, event):
@@ -275,7 +344,7 @@ class Game:
         cv.delete("all")
         cv.config(bg=theme.tint(GRASS))
         tw = kinhte.towers(self.terrain, self.tiles)
-        k = CELL / SIZE  # tỉ lệ thu nhỏ sprite; làm tròn theo biên nên không hở đường nối
+        k = VIEW_CELL / SIZE  # giữ sprite 1:1 để pixel-art sắc nét, không hở đường nối
 
         def paint(ox, oy, rects, tint=True):
             for x, y, w, h, col in rects:
@@ -286,9 +355,9 @@ class Game:
                                     fill=col, outline=col)
 
         for (r, c), rects in self.sprites.items():
-            ox, oy = c * CELL, r * CELL
+            ox, oy = c * VIEW_CELL, r * VIEW_CELL
             if (r, c) in self.dark.cells:  # bị nuốt: đen kịt, xoá sạch hình bên dưới
-                cv.create_rectangle(ox, oy, ox + CELL, oy + CELL,
+                cv.create_rectangle(ox, oy, ox + VIEW_CELL, oy + VIEW_CELL,
                                     fill="#000000", outline="#000000")
                 continue
             paint(ox, oy, rects)
@@ -300,10 +369,10 @@ class Game:
                     paint(ox, oy, BUILD_SPRITES[sp], tint=sp != "Tower of Light")
                 for i in range(lvl - 1):  # mỗi chấm vàng = 1 cấp đã nâng
                     x = ox + 3 + i * 7
-                    cv.create_rectangle(x, oy + CELL - 9, x + 5, oy + CELL - 4,
+                    cv.create_rectangle(x, oy + VIEW_CELL - 9, x + 5, oy + VIEW_CELL - 4,
                                         fill="#ffd54a", outline="#7a5a00")
             if self.playing and is_lit((r, c), tw):
-                cv.create_rectangle(ox + 2, oy + 2, ox + CELL - 2, oy + CELL - 2,
+                cv.create_rectangle(ox + 2, oy + 2, ox + VIEW_CELL - 2, oy + VIEW_CELL - 2,
                                     outline="#ffe66d", width=2, dash=(4, 3))
         self.draw_overlay()
 
@@ -316,20 +385,25 @@ class Game:
             nxt = self.dark.current_cell()
             if nxt:
                 r, c = nxt
-                cv.create_rectangle(c * CELL + 4, r * CELL + 4, (c + 1) * CELL - 4,
-                                    (r + 1) * CELL - 4, outline="#b36bff", width=2,
+                cv.create_rectangle(c * VIEW_CELL + 4, r * VIEW_CELL + 4, (c + 1) * VIEW_CELL - 4,
+                                    (r + 1) * VIEW_CELL - 4, outline="#b36bff", width=2,
                                     tags="ov")
         if self.playing and self.selected:
             r, c = self.selected
-            cv.create_rectangle(c * CELL + 2, r * CELL + 2, (c + 1) * CELL - 2,
-                                (r + 1) * CELL - 2, outline="#1e90ff", width=3, tags="ov")
+            cv.create_rectangle(c * VIEW_CELL + 2, r * VIEW_CELL + 2, (c + 1) * VIEW_CELL - 2,
+                                (r + 1) * VIEW_CELL - 2, outline="#1e90ff", width=3, tags="ov")
             if self.build_turn is None:  # mũi tên hướng dẫn chỉ hiện trước nước đi đầu tiên
-                cx, top = c * CELL + CELL // 2, max(r * CELL - 2, 14)
+                cx, top = c * VIEW_CELL + VIEW_CELL // 2, max(r * VIEW_CELL - 2, 14)
                 cv.create_polygon(cx - 7, top - 12, cx + 7, top - 12, cx, top,
                                   fill="#1e90ff", outline="#0b5cad", tags="ov")
 
 
-if __name__ == "__main__":
+def main():
+    """Khởi chạy ứng dụng desktop."""
     root = tk.Tk()
     Game(root)
     root.mainloop()
+
+
+if __name__ == "__main__":
+    main()
