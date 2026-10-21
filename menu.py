@@ -117,7 +117,7 @@ def _levels_text():
     """Liệt kê các cấp nâng được, lấy thẳng từ bảng CHAINS trong kinhte.py."""
     out = []
     labels = {"grass_magic": "ô cỏ kề rừng nấm",
-              "grass_tower": "ô cỏ kề Magic Workshop cấp 2, chỉ xây được 1"}
+              "grass_tower": "ô cỏ kề Magical Village cấp 2"}
     for kind in ("forest", "rock", "grass", "grass_magic", "mushroom", "grass_tower", "circle"):
         where = labels.get(kind) or f"ô {TERRAIN_VI[kind]}"
         for i, lv in enumerate(CHAINS[kind], 1):

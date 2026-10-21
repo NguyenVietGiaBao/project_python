@@ -1,89 +1,59 @@
-"""Kinh tế: tài nguyên, hệ thống cấp của ô, chi phí tăng dần, sản xuất."""
+"""Hệ thống kinh tế và cây nâng cấp cho Stop the Darkness.
+
+Bản tích hợp: cấu trúc ID/đồ thị nâng cấp của phiên bản 2, sprite phân biệt,
+chọn nhánh bằng Tkinter và bonus kinh tế của phiên bản 1.
+Mọi số liệu chưa có bằng chứng từ game gốc được giữ là thông số mô phỏng.
+
+Thiết kế tương thích với Main.py hiện có:
+- tiles vẫn nhận giá trị số (để phần vẽ hiện tại dùng được), nhưng mỗi giá trị
+  là TileLevel nên cũng lưu mã công trình thật để hỗ trợ các nhánh nâng cấp.
+- CHAINS vẫn tồn tại cho menu/các bên gọi cũ; luật nâng cấp dùng STRUCTURES + UPGRADES.
+- Công trình được mở khóa dựa trên những ô kề, cấp thật của ô và tài nguyên.
+"""
+from collections import deque
 from dark import TICK_MS
-from map import neighbors, rect, TERRAIN_VI
+from map import neighbors, rect
 
-RES_VI = {"wood": "Gỗ", "stone": "Đá", "mana": "Mana", "tech": "Tech"}
-CIRCLE_COST = {"mana": 100, "stone": 100}   # chi phí kích hoạt vòng đá = điều kiện thắng duy nhất
-PER_TICK = TICK_MS / 60000   # sản lượng ghi theo PHÚT -> đổi ra lượng nhận mỗi nhịp
-
-
-def L(name, prod=None, base=None, step=None, need=None, sprite=None, desc="", boost=None):
-    """Một cấp của ô.
-    prod : sản lượng mỗi phút, vd {"wood": 5}
-    base : chi phí khi nâng lên cấp này LẦN ĐẦU
-    step : mỗi lần nâng sau đó, chi phí cộng thêm bấy nhiêu (vd {"wood": 2})
-    need : điều kiện kề bên: (các loại ô, cấp tối thiểu, chữ hiển thị) hoặc None
-    sprite: tên hình trong BUILD_SPRITES vẽ đè lên ô (None = không vẽ)
-    boost: tăng sản lượng cho các ô KỀ BÊN, vd {"wood": 0.25, "stone": 0.25} = +25% gỗ, +25% đá"""
-    return {"name": name, "prod": prod or {}, "base": base or {}, "step": step or {},
-            "need": need, "sprite": sprite, "desc": desc, "boost": boost or {}}
+RES_VI = {"wood": "Gỗ", "stone": "Đá", "mana": "Mana", "tech": "Công nghệ"}
+# Giữ tên hằng để các module cũ còn import được. TECH_WIN là mức công nghệ cần
+# chuẩn bị cho nhánh Light Research Facility, không tự nó kích hoạt chiến thắng.
+TECH_WIN = 600
+TOWERS_WIN = 2  # hằng tương thích ngược; Tower of Light là phòng thủ, không tự thắng.
+PER_TICK = TICK_MS / 60000  # production được quy ước theo phút.
+GAME_MODE = "standard"  # Main.py hiện chỉ triển khai Standard; Extended là opt-in.
 
 
-# ===== BẢNG SỐ LIỆU: sửa ở đây. Phần tử đầu tiên của mỗi danh sách là cấp 1 (miễn phí).
-# Forest và Rocks lấy đúng theo bảng của bạn. Grass / Mushroom là SỐ TẠM, chưa có thiết kế.
-CHAINS = {
-    "forest": [
-        L("Forest"),
-        L("Forest", {"wood": 5}, {"wood": 3}, {"wood": 2}, sprite="Forest 2"),
-        L("Forest", {"wood": 7}, {"wood": 5}, {"wood": 2}, sprite="Forest 3"),
-        L("Forest", {"wood": 9}, {"wood": 7, "stone": 5}, {"wood": 2, "stone": 2},
-          sprite="Forest 4"),
-    ],
-    "rock": [
-        L("Rocks"),
-        L("Rocks", {"stone": 3}, {"wood": 8}, {"wood": 2}, sprite="Rocks 2"),
-        L("Rocks", {"stone": 5}, {"wood": 10, "stone": 3}, {"wood": 2, "stone": 2},
-          sprite="Rocks 3"),
-        L("Rocks", {"stone": 7}, {"wood": 12, "stone": 5, "tech": 2},
-          {"wood": 2, "stone": 2, "tech": 1}, sprite="Rocks 4"),
-    ],
-    # --- số tạm ---
-    "grass": [
-        L("Field"),
-        L("Workshop", {"tech": 2}, {"wood": 5}, {},
-          need=(("forest", "rock"), 2, "Forest/Rocks cấp 2 trở lên"), sprite="Workshop",
-          boost={"wood": 0.25, "stone": 0.25}),
-        L("Workshop", {"tech": 2}, {"wood": 10, "stone": 4}, {}, sprite="Workshop 2",
-          boost={"wood": 0.5, "stone": 0.5}),
-    ],
-    # --- ô cỏ nằm KỀ rừng nấm: tự động dùng chuỗi này thay cho "grass" (xem chain_at) ---
-    "grass_magic": [
-        L("Field"),
-        L("Magic Workshop", {"mana": 2}, {"wood": 6, "mana": 1}, {},
-          need=(("mushroom",), 2, "Market (nâng rừng nấm lên cấp 2)"), sprite="Magic Workshop",
-          boost={"wood": 0.25, "mana": 0.25}),
-        L("Magic Workshop", {"mana": 2}, {"wood": 15, "stone": 3, "mana": 5}, {},
-          sprite="Magic Workshop 2", boost={"wood": 0.5, "mana": 0.5}),
-    ],
-    "mushroom": [
-        L("Mushroom Forest"),
-        L("Market", {"tech": 2, "mana": 2}, {"wood": 10}, {}, sprite="Market"),
-        L("Market", {"tech": 2, "mana": 4}, {"wood": 15, "stone": 3, "mana": 5}, {},
-          sprite="Market 2"),
-    ],
-    # --- vòng đá giữa bản đồ: nâng lên cấp 2 là THẮNG ---
-    "circle": [
-        L("Stone Circle", desc="Nâng cấp để kích hoạt và thắng game"),
-        L("Stone Circle", None, CIRCLE_COST, {}, sprite="Stone Circle 2",
-          desc="Vòng đá đã được kích hoạt"),
-    ],
-    # --- chưa nâng cấp được ---
-    "water": [L("Water")],
-}
+def set_game_mode(mode):
+    """Chọn standard / extended bằng code; Main.py chưa có menu đổi mode."""
+    global GAME_MODE
+    if mode not in {"standard", "extended"}:
+        raise ValueError("Mode phải là 'standard' hoặc 'extended'.")
+    GAME_MODE = mode
 
-# --- Tower of Light: công trình RIÊNG, không thuộc chuỗi Workshop ---
-# Ô cỏ chưa xây mà KỀ một "Magic Workshop 2" (cấp 3/3) sẽ tự dùng chuỗi này thay cho Workshop,
-# miễn là chưa có Tower nào (xem chain_at). Chỉ xây được 1 Tower; xây xong ô đó đổi loại
-# thành "tower" để các hàm tra cấp/vẽ sprite biết đây là Tower.
-TOWER_CHAIN = [
-    L("Field"),
-    L("Tower of Light", {"mana": 5}, {"wood": 10, "stone": 5, "mana": 25}, {},
-      sprite="Tower of Light", desc="Soi sáng bán kính 2 ô, bóng tối tiến chậm hơn (không thắng game)"),
-]
-CHAINS["grass_tower"] = TOWER_CHAIN
-CHAINS["tower"] = TOWER_CHAIN
-TERRAIN_VI.setdefault("tower", TERRAIN_VI["grass"])   # Main.py tra tên ô trong bảng này
 
+# Hiệu ứng cộng hưởng, tách khỏi sản lượng gốc trong STRUCTURES để dễ kiểm thử.
+# Mẹo chơi của cộng đồng xác nhận Forest kề bên tăng 25% sản lượng gỗ của ô.
+WOOD_ADJACENCY_BONUS = 0.25
+# Cộng đồng cũng ghi nhận Dock tăng hiệu quả phép thuật gần nước, nhưng nguồn
+# công khai không nêu chính xác hệ số. Hệ số này để riêng để dễ hiệu chỉnh khi
+# có thể so sánh trực tiếp với giao diện bản gốc.
+DOCK_MAGIC_BONUS = 0.25
+# Hệ số dưới đây là cân bằng mô phỏng, CHƯA được xác nhận chính xác từ bản gốc.
+ROCK_ADJACENCY_BONUS = 0.20
+MUSHROOM_ADJACENCY_BONUS = 0.20
+CITY_TECH_BONUS = 0.15
+# Bonus "Workshop" từ bản cũ: công trình trong nhánh làng/thành phố (và Magical Water
+# City) tăng sản lượng của các ô XUNG QUANH. Nhiều công trình thì cộng dồn.
+# Phạm vi bonus: 8 = cả 4 ô cạnh và 4 ô góc; đổi thành 4 để chỉ tính 4 ô cạnh.
+# (Chỉ bonus kiểu Workshop dùng phạm vi này; các bonus Forest/Rocks/nấm/Dock/thành
+# phố và điều kiện xây vẫn tính theo 4 ô cạnh.)
+BOOST_NEIGHBORS = 8
+#   Workshop       : +Gỗ, +Đá   (nhánh làng gỗ và làng mỏ)
+#   Magic Workshop : +Gỗ, +Mana (nhánh làng phép thuật)
+# Cấp 1 của làng nhận hệ số x1 (+25%); cấp 2 trở lên và thành phố nhận x2 (+50%).
+# Ngoại lệ: Magical City được +100% Gỗ và Mana (xem BOOST_BY_ID).
+WORKSHOP_BOOST = {"wood": 0.25, "stone": 0.25}
+MAGIC_WORKSHOP_BOOST = {"wood": 0.25, "mana": 0.25}
 
 # ---------- sprite công trình
 # --- vẽ nhà: các hàm dùng chung -------------------------------------------------
@@ -542,6 +512,25 @@ def _tower():
     return s
 
 
+def _recolor(sprite, mapping):
+    """Đổi màu một sprite theo bảng {màu cũ: màu mới}; màu không có trong bảng giữ nguyên."""
+    return [(x, y, w, h, mapping.get(col, col)) for x, y, w, h, col in sprite]
+
+
+# Bảng màu xanh dương cho Tower of Water (cùng hình dáng với Tower of Light).
+_WATER_PALETTE = {
+    T_WALL: "#3f6f96", T_WALL_L: "#5b97c2", T_WALL_D: "#24425f", T_LINE: "#31587a",
+    T_ROOF: "#2e6fb0", T_ROOF_L: "#4f95d6", T_ROOF_D: "#1c4670",
+    T_GLOW: "#4ac7ee", T_GLOW_IN: "#bdf1ff", T_DOOR: "#10243a",
+    "#8a86b8": "#9fd3f5",
+}
+
+
+def _tower_water():
+    """Tower of Water: giống Tower of Light nhưng toàn bộ màu chuyển sang xanh dương."""
+    return _recolor(_tower(), _WATER_PALETTE)
+
+
 BUILD_SPRITES = {"Forest 2": _treehouse2(), "Forest 3": _treehouse3(),
                  "Forest 4": _treehouse4(),
                  "Rocks 2": _stonehouse2(), "Rocks 3": _stonehouse3(),
@@ -553,192 +542,1382 @@ BUILD_SPRITES = {"Forest 2": _treehouse2(), "Forest 3": _treehouse3(),
                  "Stone Circle 2": _circle_active()}
 
 
-# ---------- luật kinh tế
-# Trạng thái ván chơi:
-#   tiles  = {(r, c): cấp}  chỉ lưu ô đã nâng (cấp >= 2); ô không có trong dict là cấp 1
-#   counts = {(loại ô, cấp): số lần đã nâng lên cấp đó} -> làm giá tăng dần
-#   carry  = phần lẻ tài nguyên chưa đủ 1 đơn vị (sản lượng/nhịp là số lẻ)
+# ---------- dữ liệu công trình và luật kinh tế ---------------------------------
+# Giá trị chi phí/sản lượng giữ lại cho Forest/Rocks đang có trong dự án.
+# Với nhánh nâng cấp mới, những thông số chưa được xác nhận đầy đủ từ game gốc
+# được chọn để giữ cân bằng và nhất quán nội bộ, không được coi là số liệu gốc.
+
+class TileLevel(int):
+    """Giá trị tương thích int của Main.py, đồng thời mang mã công trình.
+
+    Ví dụ: TileLevel(4, "potion_factory_1") vẫn so sánh/hiển thị như cấp 4,
+    nhưng kinh tế biết ô đó là Potion Factory chứ không phải Forest cấp 4.
+    """
+    def __new__(cls, stage, building_id=None):
+        obj = int.__new__(cls, int(stage))
+        obj.building_id = building_id
+        return obj
+
+
+def _spec(building_id, name, kind, *, tier=1, stage=2, family=None, tags=(),
+          prod=None, base=None, step=None, rule="always", sprite=None, desc="",
+          priority=50):
+    return {
+        "id": building_id,
+        "name": name,
+        "kind": kind,
+        "tier": tier,
+        "stage": stage,
+        "family": family or building_id,
+        "tags": frozenset(tags),
+        "prod": dict(prod or {}),
+        "base": dict(base or {}),
+        "step": dict(step or {}),
+        "rule": rule,
+        "sprite": sprite,
+        "desc": desc,
+        "priority": priority,
+        "boost": {},
+    }
+
+
+STRUCTURES = {}
+
+
+def _add(building_id, name, kind, **kwargs):
+    info = _spec(building_id, name, kind, **kwargs)
+    STRUCTURES[building_id] = info
+    return info
+
+
+# Địa hình/cấp gốc. Ô chưa xuất hiện trong tiles tương đương tier 1.
+_add("field", "Field", "grass", tier=0, stage=1, family="field",
+     tags=("field",), desc="Ô đất trống; công trình phụ thuộc địa hình liền kề.")
+_add("forest_1", "Forest", "forest", tier=1, stage=1, family="forest",
+     tags=("forest",), desc="Rừng tự nhiên.")
+_add("forest_2", "Forest", "forest", tier=2, stage=2, family="forest",
+     prod={"wood": 5}, base={"wood": 3}, step={"wood": 2},
+     tags=("forest",), sprite="Forest 2", desc="Tạo gỗ.")
+_add("forest_3", "Forest", "forest", tier=3, stage=3, family="forest",
+     prod={"wood": 7}, base={"wood": 5}, step={"wood": 2},
+     tags=("forest",), sprite="Forest 3", desc="Tạo gỗ nhiều hơn.")
+_add("forest_4", "Forest", "forest", tier=4, stage=4, family="forest",
+     prod={"wood": 9}, base={"wood": 7, "stone": 5}, step={"wood": 2, "stone": 2},
+     tags=("forest",), sprite="Forest 4", desc="Rừng cấp cao; có thể mở nhánh Potion Factory.")
+# Nhánh bí mật được cộng đồng ghi nhận: một Forest cấp 1 nằm giữa bốn Forest cấp 1
+# có thể trở thành Treetop Village. Giá/sản lượng riêng của nhánh này là ước lượng cân bằng.
+_add("treetop_village", "Treetop Village", "forest", tier=1, stage=2,
+     family="treetop_village", tags=("wood_source", "city_seed", "wood_city"),
+     rule="treetop_village", prod={"wood": 12, "tech": 1},
+     base={"wood": 15, "stone": 5}, sprite="Forest 2",
+     desc="Làng trên ngọn cây; cần bốn Forest cấp 1 ở các ô kề bên.", priority=1)
+_add("rock_1", "Rocks", "rock", tier=1, stage=1, family="rock",
+     tags=("rock",), desc="Địa hình đá tự nhiên.")
+_add("rock_2", "Rocks", "rock", tier=2, stage=2, family="rock",
+     prod={"stone": 3}, base={"wood": 8}, step={"wood": 2},
+     tags=("rock",), sprite="Rocks 2", desc="Khai thác đá.")
+_add("rock_3", "Rocks", "rock", tier=3, stage=3, family="rock",
+     prod={"stone": 5}, base={"wood": 10, "stone": 3}, step={"wood": 2, "stone": 2},
+     tags=("rock",), sprite="Rocks 3", desc="Khai thác đá hiệu quả hơn.")
+_add("rock_4", "Rocks", "rock", tier=4, stage=4, family="rock",
+     prod={"stone": 7}, base={"wood": 12, "stone": 5, "tech": 2},
+     step={"wood": 2, "stone": 2, "tech": 1},
+     tags=("rock",), sprite="Rocks 4", desc="Mỏ đá cấp cao.")
+_add("mushroom_1", "Mushroom Forest", "mushroom", tier=1, stage=1,
+     family="mushroom_forest", tags=("magic_source",), desc="Rừng nấm tự nhiên.")
+_add("mushroom_2", "Mushroom Forest", "mushroom", tier=2, stage=2,
+     family="mushroom_forest", tags=("magic_source",), prod={"mana": 3},
+     base={"wood": 8}, step={"wood": 2}, sprite="Market",
+     desc="Tạo Mana; mở rộng nguồn phép thuật.")
+_add("mushroom_3", "Mushroom Forest", "mushroom", tier=3, stage=3,
+     family="mushroom_forest", tags=("magic_source",), prod={"mana": 7},
+     base={"wood": 15, "stone": 5}, step={"wood": 3, "stone": 1}, sprite="Market",
+     desc="Nguồn Mana mạnh; có thể mở khóa thành phố nấm.")
+_add("water_1", "Water", "water", tier=1, stage=1, family="water",
+     tags=("water",), desc="Vùng nước; có thể xây Dock.")
+_add("dock", "Dock", "water", tier=1, stage=2, family="dock", tags=("dock",),
+     prod={"tech": 1}, base={"wood": 8}, sprite="Port",
+     desc="Bến tàu; tính vào điều kiện Mainport.")
+_add("stone_circle_1", "Stone Circle", "circle", tier=1, stage=1,
+     family="stone_circle", tags=("stone_circle",), desc="Vòng đá cổ.")
+_add("stone_circle_2", "Stone Circle Level 2", "circle", tier=2, stage=2,
+     family="stone_circle", tags=("stone_circle", "ending"),
+     base={"stone": 100, "mana": 100},
+     desc="Nâng cấp vòng đá bằng 100 Đá và 100 Mana để chặn bóng tối và hoàn thành nhánh chiến thắng.")
+
+# Rừng rễ cây là một nhánh đặc biệt trên ô đất trống, không phải loại địa hình
+# được sinh sẵn trên bản đồ. Đây là điều kiện được cộng đồng game ghi nhận.
+_add("tree_roots_1", "Tree Roots", "grass", tier=1, stage=2, family="tree_roots",
+     tags=("forest_like", "wood_source"), rule="tree_roots_seed",
+     prod={"wood": 2, "mana": 1}, base={"wood": 18, "stone": 5},
+     sprite="Forest 2", desc="Rễ cây cổ thụ; cần 3 Forest và 1 Village/City kề bên.", priority=2)
+_add("tree_roots_2", "Tree Roots", "grass", tier=2, stage=3, family="tree_roots",
+     tags=("forest_like", "wood_source"), prod={"wood": 5, "mana": 2},
+     base={"wood": 25, "stone": 10}, step={"wood": 4, "stone": 2},
+     sprite="Forest 3", desc="Rễ cây phát triển mạnh hơn.")
+_add("tree_roots_3", "Tree Roots", "grass", tier=3, stage=4, family="tree_roots",
+     tags=("forest_like", "wood_source"), prod={"wood": 8, "mana": 4},
+     base={"wood": 35, "stone": 18}, step={"wood": 5, "stone": 3},
+     sprite="Forest 4", desc="Có thể mở khóa Tree Roots City/Port City.")
+_add("tree_roots_4", "Tree Roots", "grass", tier=4, stage=4, family="tree_roots",
+     tags=("forest_like", "wood_source"), prod={"wood": 12, "mana": 6},
+     base={"wood": 50, "stone": 25, "mana": 15}, step={"wood": 6, "stone": 3},
+     sprite="Forest 4", desc="Cấp cao nhất; có thể hỗ trợ Potion Factory.")
+
+# Nhánh dân cư trên ô Field. Tên/tuyến nâng cấp được giữ thành ID riêng vì mỗi
+# nhánh có thể có hiệu ứng, yêu cầu và đường tiến triển khác nhau.
+_add("wooden_village", "Wooden Village", "grass", tier=1, stage=2,
+     family="wood_village", tags=("city_seed", "wood_city"), rule="adj_forest",
+     prod={"wood": 2}, base={"wood": 10}, sprite="Workshop",
+     desc="Làng gỗ; cần Forest kề bên.", priority=30)
+_add("wooden_village_2", "Wooden Village Level 2", "grass", tier=2, stage=3,
+     family="wood_village", tags=("city_seed", "wood_city"), prod={"wood": 5},
+     base={"wood": 22, "stone": 4}, step={"wood": 3}, sprite="Workshop",
+     desc="Làng gỗ cấp 2.")
+_add("wooden_city", "Wooden City", "grass", tier=1, stage=4,
+     family="wood_city", tags=("city", "wood_city"), rule="wooden_city_route",
+     prod={"wood": 10, "tech": 1}, base={"wood": 40, "stone": 15}, sprite="Market",
+     desc="Thành phố gỗ; có thể mở trực tiếp khi kề ba Forest và một ngôi làng.", priority=12)
+_add("wooden_city_2", "Wooden City Level 2", "grass", tier=2, stage=4,
+     family="wood_city", tags=("city", "city_level2", "wood_city"),
+     prod={"wood": 15, "tech": 3}, base={"wood": 70, "stone": 30, "tech": 5},
+     sprite="Market", desc="Thành phố gỗ cấp 2; có thể phát triển thành Great City.")
+_add("wooden_port_city", "Wooden Port City", "grass", tier=1, stage=4,
+     family="wood_city", tags=("city", "city_level2", "wood_city", "port_city"),
+     rule="wooden_port_city", prod={"wood": 18, "tech": 8},
+     base={"wood": 90, "stone": 35, "tech": 10}, sprite="Port",
+     desc="Port cấp 2 kề ít nhất ba Forest cấp 4.", priority=15)
+
+_add("mining_village", "Mining Village", "grass", tier=1, stage=2,
+     family="mining_village", tags=("city_seed", "mining"), rule="adj_rock",
+     prod={"stone": 2}, base={"wood": 14}, sprite="Rocks 2",
+     desc="Làng khai mỏ; cần Rocks kề bên.", priority=35)
+_add("mining_village_2", "Mining Village Level 2", "grass", tier=2, stage=3,
+     family="mining_village", tags=("city_seed", "mining"), prod={"stone": 4, "tech": 1},
+     base={"wood": 25, "stone": 5}, sprite="Rocks 2", desc="Làng khai mỏ cấp 2.")
+_add("mining_city", "Mining City", "grass", tier=1, stage=4,
+     family="mining_city", tags=("city", "mining"), prod={"stone": 8, "tech": 3},
+     base={"wood": 40, "stone": 18}, sprite="Rocks 3", desc="Thành phố khai mỏ.")
+_add("mining_research_facility", "Stone Tech Center", "grass", tier=1, stage=4,
+     family="mining_research", tags=("research", "mining"),
+     prod={"stone": 10, "tech": 8}, base={"wood": 55, "stone": 30, "tech": 10},
+     sprite="Rocks 3", desc="Trung tâm công nghệ đá; mở khóa Mining Research City Level 2.")
+_add("mining_research_city_2", "Mining Research City Level 2", "grass", tier=2, stage=4,
+     family="mining_research", tags=("city", "city_level2", "research", "mining"),
+     prod={"stone": 15, "tech": 16}, base={"wood": 85, "stone": 45, "tech": 25},
+     sprite="Rocks 4", desc="Mở khóa các Great City dựa trên địa hình kề.")
+
+# Nhánh phép thuật.
+_add("magical_village", "Magical Village", "grass", tier=1, stage=2,
+     family="magic_village", tags=("magic", "city_seed"), rule="adj_mushroom",
+     prod={"mana": 3}, base={"wood": 14, "stone": 4}, sprite="Market",
+     desc="Làng phép thuật; cần Mushroom Forest kề bên.", priority=40)
+_add("magical_village_2", "Magical Village Level 2", "grass", tier=2, stage=3,
+     family="magic_village", tags=("magic", "city_seed"), prod={"mana": 8, "tech": 2},
+     base={"wood": 25, "stone": 10, "mana": 5}, sprite="Market",
+     desc="Làng phép thuật cấp 2; giúp mở khóa Tower of Light.")
+_add("magical_city", "Magical City", "grass", tier=1, stage=4,
+     family="magic_city", tags=("magic", "city", "city_level2"), rule="magical_city",
+     prod={"mana": 18, "tech": 8}, base={"wood": 50, "stone": 25, "mana": 30},
+     sprite="Market", desc="Thành phố phép thuật; cần Tower of Light kề bên.", priority=15)
+_add("magical_port_city", "Magical Port City", "grass", tier=1, stage=4,
+     family="magic_city", tags=("magic", "city", "city_level2", "port_city"),
+     rule="magical_port_city", prod={"mana": 20, "tech": 12},
+     base={"wood": 75, "stone": 30, "mana": 25}, sprite="Port",
+     desc="Thành phố cảng phép thuật; cần Water và Tower of Light kề bên.", priority=7)
+_add("mushroom_city", "Mushroom City", "grass", tier=1, stage=4,
+     family="magic_city", tags=("magic", "city", "city_level2"), rule="mushroom_city",
+     prod={"mana": 14, "wood": 4}, base={"wood": 45, "stone": 15, "mana": 25},
+     sprite="Market", desc="Thành phố nấm; cần Mushroom Forest cấp 3 kề bên.", priority=14)
+_add("mushroom_port_city", "Mushroom Port City", "grass", tier=1, stage=4,
+     family="magic_city", tags=("magic", "city", "city_level2", "port_city"),
+     rule="mushroom_port_city", prod={"mana": 20, "tech": 7},
+     base={"wood": 65, "stone": 25, "mana": 35}, sprite="Port",
+     desc="Thành phố cảng nấm; cần nước và Mushroom Forest cấp 3 kề bên.", priority=10)
+_add("tree_roots_city", "Tree Roots City", "grass", tier=1, stage=4,
+     family="wood_city", tags=("city", "city_level2", "wood_city", "magic"),
+     rule="tree_roots_city", prod={"wood": 15, "mana": 8},
+     base={"wood": 60, "stone": 25, "mana": 15}, sprite="Forest 4",
+     desc="Thành phố rễ cây; cần Tree Roots cấp 3 trở lên kề bên.", priority=12)
+_add("tree_roots_port_city", "Tree Roots Port City", "grass", tier=1, stage=4,
+     family="wood_city", tags=("city", "city_level2", "wood_city", "magic", "port_city"),
+     rule="tree_roots_port_city", prod={"wood": 18, "mana": 12, "tech": 5},
+     base={"wood": 80, "stone": 30, "mana": 20}, sprite="Port",
+     desc="Thành phố cảng rễ cây; cần Tree Roots cấp 3+ và nước kề bên.", priority=8)
+_add("magical_water_city", "Magical Water City", "grass", tier=1, stage=4,
+     family="magic_city", tags=("magic", "city", "city_level2", "water_city"),
+     rule="magical_water_city", prod={"mana": 20, "tech": 10},
+     base={"wood": 80, "stone": 35, "mana": 45}, sprite="Port",
+     desc="Thành phố phép thuật ven nước; hưởng cộng hưởng với Great City of Tech and Magic.", priority=9)
+
+# Cảng và công trình liên quan đến nước.
+_add("port", "Port", "grass", tier=1, stage=2, family="port", tags=("port",),
+     rule="adj_water", prod={"tech": 3, "wood": 1}, base={"wood": 25, "stone": 8},
+     sprite="Port", desc="Cảng; cần có Water kề bên.", priority=25)
+_add("port_2", "Port Level 2", "grass", tier=2, stage=3, family="port", tags=("port",),
+     rule="adj_water", prod={"tech": 6, "wood": 2},
+     base={"wood": 40, "stone": 15, "tech": 4}, sprite="Port",
+     desc="Cảng cấp 2; có thể phát triển thành Mainport hoặc thành phố cảng.")
+_add("mainport_1", "Mainport Level 1", "grass", tier=1, stage=4,
+     family="mainport", tags=("port",), rule="mainport_1",
+     prod={"tech": 18, "wood": 4}, base={"wood": 65, "stone": 25, "tech": 20},
+     sprite="Port", desc="Cần ít nhất ba Port trên cùng vùng nước liên thông.", priority=10)
+_add("mainport_2", "Mainport Level 2", "grass", tier=2, stage=4,
+     family="mainport", tags=("port",), rule="mainport_2",
+     prod={"tech": 35, "wood": 8}, base={"wood": 95, "stone": 45, "tech": 40},
+     sprite="Port", desc="Cần ít nhất bốn Port/Mainport trên cùng vùng nước liên thông (mốc cân bằng).")
+_add("lighthouse", "Lighthouse", "grass", tier=1, stage=4,
+     family="lighthouse", tags=("light", "tech_building"), rule="lighthouse",
+     prod={"tech": 18}, base={"wood": 70, "stone": 35, "tech": 15},
+     sprite="Tower of Light", desc="Hải đăng cần Water và một Port kề bên.", priority=3)
+_add("tower_light_1", "Tower of Light", "grass", tier=1, stage=2,
+     family="tower_light", tags=("tower_light", "light", "magic_building"), rule="tower_light",
+     base={"wood": 30, "stone": 20, "tech": 10}, sprite="Tower of Light",
+     desc="Thắp sáng vùng xung quanh và ngăn bóng tối xâm nhập.", priority=5)
+_add("tower_light_2", "Tower of Light", "grass", tier=2, stage=3,
+     family="tower_light", tags=("tower_light", "light", "magic_building"),
+     prod={"tech": 4}, base={"wood": 45, "stone": 30, "mana": 20},
+     sprite="Tower of Light", desc="Tower of Light nâng cấp, tăng hiệu quả phòng thủ.")
+_add("tower_water_1", "Tower of Water", "grass", tier=1, stage=2,
+     family="tower_water", tags=("tower_water", "magic_building"), rule="tower_water",
+     prod={"mana": 4, "tech": 3}, base={"wood": 35, "stone": 18, "mana": 10},
+     sprite="Tower of Light", desc="Cần Water và Magical Village kề bên.", priority=7)
+
+# Khu nghiên cứu và thành phố đặc biệt: các điều kiện được viết thành rule có tên.
+_add("great_city_cities", "Great City of Cities", "grass", tier=1, stage=4,
+     family="great_city", tags=("city", "city_level2", "great_city"), rule="great_city_cities",
+     prod={"wood": 15, "stone": 15, "tech": 25},
+     base={"wood": 100, "stone": 60, "tech": 35}, sprite="Market",
+     desc="Cần bốn ô thành phố cấp 2+ liền kề.", priority=3)
+_add("great_city_tech_magic", "Great City of Tech and Magic", "grass", tier=1, stage=4,
+     family="great_city", tags=("city", "city_level2", "great_city", "tech_magic"),
+     rule="great_city_tech_magic", prod={"mana": 20, "tech": 35},
+     base={"wood": 100, "stone": 60, "mana": 40, "tech": 45}, sprite="Market",
+     desc="Cần ít nhất hai thành phố cấp 2+ và một công trình phép thuật kề bên.", priority=4)
+_add("magical_city_of_cities", "Magical City of Cities", "grass", tier=1, stage=4,
+     family="great_city", tags=("magic", "city", "city_level2", "great_city"),
+     rule="magical_city_of_cities", prod={"mana": 30, "tech": 25},
+     base={"wood": 110, "stone": 60, "mana": 45, "tech": 35}, sprite="Market",
+     desc="Bốn ô kề phải thuộc thành phố hoặc công trình phép thuật/ánh sáng.", priority=5)
+_add("great_city_mining", "Great City of Mining", "grass", tier=1, stage=4,
+     family="great_city", tags=("city", "city_level2", "great_city", "mining"),
+     rule="great_city_mining", prod={"stone": 30, "tech": 25},
+     base={"wood": 105, "stone": 70, "tech": 30}, sprite="Rocks 4",
+     desc="Cần ba ô Rocks cấp 4 kề bên.", priority=3)
+_add("great_city_stone_wood", "Great City of Stone and Wood", "grass", tier=1, stage=4,
+     family="great_city", tags=("city", "city_level2", "great_city", "mining", "wood_city"),
+     rule="great_city_stone_wood", prod={"stone": 20, "wood": 20, "tech": 20},
+     base={"wood": 105, "stone": 70, "tech": 30}, sprite="Market",
+     desc="Cần hai Rocks và hai Forest cấp 4+ kề bên.", priority=4)
+_add("great_city_magical_mining", "Great City of Magical Mining", "grass", tier=1, stage=4,
+     family="great_city", tags=("city", "city_level2", "great_city", "mining", "magic"),
+     rule="great_city_magical_mining", prod={"stone": 20, "mana": 20, "tech": 25},
+     base={"wood": 110, "stone": 65, "mana": 35, "tech": 35}, sprite="Market",
+     desc="Cần hai Rocks cấp 4+ và Mushroom Forest/Tree Roots cấp 3+ kề bên.", priority=5)
+_add("light_research_facility", "Light Research Facility", "grass", tier=1, stage=4,
+     family="light_research", tags=("research", "light", "ending"), rule="light_research",
+     prod={"tech": 25}, base={"tech": TECH_WIN},
+     sprite="Tower of Light", desc="Tiêu tốn 600 Công nghệ để hoàn thành nhánh chiến thắng nghiên cứu ánh sáng.", priority=1)
+
+# Nhà máy thuốc: hai lần nâng cấp chi phí Công nghệ được cộng đồng ghi nhận;
+# cấp 3 là một trong các hướng chiến thắng ở bản Extended.
+_add("potion_factory_1", "Potion Factory", "forest", tier=1, stage=4,
+     family="potion_factory", tags=("potion_factory", "magic_building"), rule="potion_factory",
+     prod={"mana": 20, "tech": 5}, base={"wood": 45, "stone": 25, "mana": 20},
+     sprite="Workshop", desc="Cần Forest cấp 4 kề Tree Roots cấp 4; nhân đôi sản lượng Gỗ và Đá toàn bản đồ.", priority=1)
+_add("potion_factory_2", "Potion Factory Level 2", "forest", tier=2, stage=4,
+     family="potion_factory", tags=("potion_factory", "magic_building"),
+     prod={"mana": 35, "tech": 15}, base={"tech": 300},
+     sprite="Market", desc="Tốn 300 Công nghệ; nâng hệ số sản lượng Gỗ và Đá toàn bản đồ lên x3.")
+_add("potion_factory_3", "Potion Factory Level 3", "forest", tier=3, stage=4,
+     family="potion_factory", tags=("potion_factory", "magic_building", "ending"),
+     prod={"mana": 60, "tech": 30}, base={"tech": 600},
+     sprite="Market", desc="Nhánh chiến thắng Potion Factory trong bản Extended.")
+
+# ---- Sprite pixel-art mở rộng (chỉ dùng hàm rect, không cần ảnh/phụ thuộc khác).
+def _build_house(body='#b58a56', roof='#854c35', size=1, tint='#ffe588',
+                 flag=False, chimney=False):
+    s = []
+    w = 20 + 8 * size
+    x = (54 - w) // 2
+    bottom = 50
+    wall_y = bottom - 12 - size * 6
+    rect(s, x - 2, bottom, w + 4, 3, '#765a40')
+    _planks(s, x, wall_y, w, bottom-wall_y, body, '#79583d')
+    _roof(s, x - 3, wall_y - 9, w + 6, roof, '#573223', 3, 3)
+    for xx in range(x + 6, x + w - 6, 10):
+        rect(s, xx, wall_y + 4, 4, 5, tint)
+    rect(s, 26, bottom - 11, 5, 11, '#4a2d23')
+    if chimney:
+        rect(s, x + w - 9, wall_y - 13, 5, 9, '#858585')
+    if flag:
+        rect(s, 26, wall_y - 17, 2, 11, '#765133')
+        rect(s, 28, wall_y - 17, 10, 5, '#e4c05c')
+    return s
+
+
+def _magic_house():
+    s = _build_house(body='#76528c', roof='#633b86', size=1, tint='#e1b9ff')
+    for x, y in ((11, 6), (42, 10), (8, 23)):
+        rect(s, x, y, 4, 4, '#f0baff')
+        rect(s, x+1, y-2, 2, 8, '#f0baff')
+    return s
+
+
+def _dock():
+    s = []
+    for x in range(6, 52, 8):
+        rect(s, x, 20, 6, 31, '#67452d')
+    rect(s, 4, 26, 46, 7, '#b1814d')
+    rect(s, 4, 31, 46, 2, '#64462d')
+    for x in range(6, 50, 8):
+        rect(s, x, 27, 1, 5, '#dcb17a')
+    return s
+
+
+def _research():
+    s = _build_house(body='#bbcbd4', roof='#687e8e', size=2, tint='#c3f9a1')
+    rect(s, 24, 5, 6, 15, '#d3e6ed')
+    rect(s, 18, 8, 18, 4, '#9ed7ed')
+    rect(s, 21, 1, 12, 6, '#eaffaa')
+    return s
+
+
+def _potion():
+    s = _build_house(body='#e7d4ad', roof='#824ea3', size=2, tint='#d3a2ec')
+    for x in (11, 37):
+        rect(s, x, 12, 6, 10, '#694381')
+        rect(s, x + 1, 16, 4, 6, '#7bffa2')
+    return s
+
+
+def _stone_circle():
+    s = []
+    for x, y in ((7, 22), (19, 8), (33, 8), (45, 22),
+                 (33, 38), (19, 38)):
+        rect(s, x, y, 7, 10, '#ded7c5')
+        rect(s, x+2, y-2, 3, 3, '#f0e3ad')
+    rect(s, 23, 21, 10, 10, '#edce75')
+    rect(s, 26, 14, 4, 23, '#fff1ad')
+    return s
+
+
+BUILD_SPRITES.update({
+    'Village': _build_house(size=1),
+    'Town': _build_house(size=2, chimney=True),
+    'City': _build_house(body='#c0b5a0', roof='#6b5b68', size=3, chimney=True),
+    'Mining Village': _build_house(body='#aaa9a4', roof='#55585c', size=1),
+    'Mining City': _build_house(body='#b7c0c5', roof='#676a70', size=2, chimney=True),
+    'Research City': _research(),
+    'Light Research Facility': _research(),
+    'Magic Village': _magic_house(),
+    'Magical City': _build_house(body='#8a6b9f', roof='#6f4c95', size=3,
+                                 tint='#dfb9fe', flag=True),
+    'Port City': _build_house(body='#b89866', roof='#a1653b', size=2, flag=True),
+    'Mainport': _port() + _build_house(size=2, flag=True),
+    'Tower of Water': _tower_water(),
+    'Dock': _dock(),
+    'Tree Roots': _treehouse3(),
+    'Treetop Village': _treehouse4(),
+    'Forest 2': _treehouse2(),
+    'Wooden City': _treehouse4(),
+    'Mushroom Forest II': _magic_house(),
+    'Mushroom Forest III': _build_house(body='#b681a8', roof='#a54369', size=2),
+    'Potion Factory': _potion(),
+    'Great City': _build_house(body='#d6c8b4', roof='#ae8648', size=3, flag=True),
+    'Stone Circle': _stone_circle(),
+})
+
+
+
+# Gán hình phân biệt theo tên nhánh, giữ pixel rectangles tương thích Main.py.
+_EXTRA_SPRITES = {
+    "Mushroom City": _build_house(body="#9c779e", roof="#b65080", size=3, tint="#f4d3fa", flag=True),
+    "Mushroom Port City": _port() + _build_house(body="#a07f9e", roof="#c858a1", size=1, tint="#f5d7f1"),
+    "Tree Roots City": _treehouse4() + [(26, 6, 5, 6, "#c4e4b6")],
+    "Tree Roots Port City": _port() + _treehouse3(),
+    "Magical Port City": _port() + _magic_house(),
+    "Magical Water City": _port() + _build_house(body="#6f89bd", roof="#627fa7", size=2, tint="#a6ffff"),
+    "Wooden Port City": _port() + _treehouse2(),
+    "Wooden Village II": _build_house(size=2, body="#ba9461"),
+    "Magical Village II": _build_house(size=2, body="#86629d", roof="#7245a0", tint="#e9c6ff"),
+    "Mining Village II": _build_house(size=2, body="#aaaaad", roof="#5d5961"),
+    "Mainport II": _port() + _build_house(body="#a88d63", size=3, flag=True),
+    "Port II": _port() + [(20, 12, 16, 6, "#d8bc86")],
+    "Tower of Light II": _tower() + [(24, 1, 7, 7, "#fff6b5"), (16, 9, 22, 4, "#f2e28b")],
+    "Tower of Water": _tower_water(),
+    "Potion Factory II": _potion() + [(12, 16, 5, 6, "#66f2c7"), (39, 10, 5, 6, "#66f2c7")],
+    "Potion Factory III": _potion() + [(23, 2, 9, 9, "#f2cfff"), (13, 6, 4, 4, "#93ffff")],
+    "Stone Tech Center": _research() + [(10, 14, 8, 10, '#94999a')],
+    "Mining Research City": _research() + [(41, 16, 6, 23, '#91918c')],
+    "Lighthouse": _tower() + [(26, 0, 5, 6, "#fff7a0"), (11, 8, 33, 4, "#fff7b0")],
+    "Great City of Tech and Magic": _build_house(body="#a48dab", roof="#76528e", size=3, flag=True, tint="#dcd8ff"),
+    "Great City of Mining": _build_house(body="#b2b6bc", roof="#666b6c", size=3, flag=True),
+    "Great City of Stone and Wood": _build_house(body="#bfa88d", roof="#765a48", size=3, flag=True),
+    "Great City of Magical Mining": _build_house(body="#9ca8b8", roof="#835a95", size=3, flag=True),
+    "Magical City of Cities": _build_house(body="#b68cb8", roof="#98629f", size=3, flag=True),
+}
+BUILD_SPRITES.update(_EXTRA_SPRITES)
+SPRITE_BY_ID = {
+    "mushroom_2": "Mushroom Forest II", "mushroom_3": "Mushroom Forest III",
+    "dock": "Dock", "stone_circle_2": "Stone Circle",
+    "tree_roots_1": "Tree Roots", "tree_roots_2": "Tree Roots", "tree_roots_3": "Tree Roots", "tree_roots_4": "Treetop Village",
+    "treetop_village": "Treetop Village",
+    "wooden_village": "Village", "wooden_village_2": "Wooden Village II", "wooden_city": "Wooden City",
+    "wooden_city_2": "City", "wooden_port_city": "Wooden Port City",
+    "mining_village": "Mining Village", "mining_village_2": "Mining Village II", "mining_city": "Mining City",
+    "mining_research_facility": "Stone Tech Center", "mining_research_city_2": "Mining Research City",
+    "magical_village": "Magic Village", "magical_village_2": "Magical Village II",
+    "magical_city": "Magical City", "magical_port_city": "Magical Port City",
+    "mushroom_city": "Mushroom City", "mushroom_port_city": "Mushroom Port City",
+    "tree_roots_city": "Tree Roots City", "tree_roots_port_city": "Tree Roots Port City",
+    "magical_water_city": "Magical Water City", "port": "Port", "port_2": "Port II",
+    "mainport_1": "Mainport", "mainport_2": "Mainport II", "lighthouse": "Lighthouse",
+    "tower_light_1": "Tower of Light", "tower_light_2": "Tower of Light II",
+    "tower_water_1": "Tower of Water", "great_city_cities": "Great City",
+    "great_city_tech_magic": "Great City of Tech and Magic", "magical_city_of_cities": "Magical City of Cities",
+    "great_city_mining": "Great City of Mining", "great_city_stone_wood": "Great City of Stone and Wood",
+    "great_city_magical_mining": "Great City of Magical Mining",
+    "light_research_facility": "Light Research Facility",
+    "potion_factory_1": "Potion Factory", "potion_factory_2": "Potion Factory II", "potion_factory_3": "Potion Factory III",
+}
+for _building_id, _sprite_name in SPRITE_BY_ID.items():
+    STRUCTURES[_building_id]["sprite"] = _sprite_name
+
+
+def _scaled(boost, factor):
+    return {resource: value * factor for resource, value in boost.items()}
+
+
+# id -> bonus cho ô kề bên. Sửa ở đây để cân bằng lại.
+BOOST_BY_ID = {
+    # Workshop (Gỗ + Đá)
+    "wooden_village": _scaled(WORKSHOP_BOOST, 1),
+    "wooden_village_2": _scaled(WORKSHOP_BOOST, 2),
+    "wooden_city": _scaled(WORKSHOP_BOOST, 2),
+    "wooden_city_2": _scaled(WORKSHOP_BOOST, 2),
+    "mining_village": _scaled(WORKSHOP_BOOST, 1),
+    "mining_village_2": _scaled(WORKSHOP_BOOST, 2),
+    "mining_city": _scaled(WORKSHOP_BOOST, 2),
+    # Magic Workshop (Gỗ + Mana)
+    "magical_village": _scaled(MAGIC_WORKSHOP_BOOST, 1),
+    "magical_village_2": _scaled(MAGIC_WORKSHOP_BOOST, 2),
+    "magical_city": {"wood": 1.0, "mana": 1.0},   # +100% Gỗ và Mana cho ô xung quanh
+    "magical_water_city": {"wood": 0.25, "mana": 0.25},
+}
+for _building_id, _boost in BOOST_BY_ID.items():
+    STRUCTURES[_building_id]["boost"] = _boost
+
+# Những ô Field có nhiều nhánh được xử lý bằng UPGRADES, không ép vào một
+# đường tuyến tính duy nhất.
+CHAINS = {
+    "forest": [STRUCTURES[f"forest_{i}"] for i in range(1, 5)],
+    "rock": [STRUCTURES[f"rock_{i}"] for i in range(1, 5)],
+    "grass": [STRUCTURES["field"], STRUCTURES["wooden_village"],
+              STRUCTURES["wooden_village_2"], STRUCTURES["wooden_city"],
+              STRUCTURES["wooden_city_2"]],
+    "mushroom": [STRUCTURES[f"mushroom_{i}"] for i in range(1, 4)],
+    "circle": [STRUCTURES["stone_circle_1"], STRUCTURES["stone_circle_2"]],
+    "water": [STRUCTURES["water_1"], STRUCTURES["dock"]],
+}
+
+# Hai nhánh của ô Field mà menu.py liệt kê riêng (xem _levels_text).
+CHAINS["grass_magic"] = [STRUCTURES["field"], STRUCTURES["magical_village"],
+                         STRUCTURES["magical_village_2"]]
+CHAINS["grass_tower"] = [STRUCTURES["field"], STRUCTURES["tower_light_1"],
+                         STRUCTURES["tower_light_2"]]
+
+# Các công trình có thể xuất hiện tiếp theo tùy loại ô hiện tại.
+UPGRADES = {
+    "forest_1": ("forest_2", "treetop_village"), "forest_2": ("forest_3",),
+    "forest_3": ("forest_4",), "forest_4": ("potion_factory_1",),
+    "potion_factory_1": ("potion_factory_2",),
+    "potion_factory_2": ("potion_factory_3",),
+    "rock_1": ("rock_2",), "rock_2": ("rock_3",),
+    "rock_3": ("rock_4",), "rock_4": (),
+    "mushroom_1": ("mushroom_2",), "mushroom_2": ("mushroom_3",),
+    "mushroom_3": (),
+    "water_1": ("dock",), "dock": (),
+    "stone_circle_1": ("stone_circle_2",), "stone_circle_2": (),
+    "field": ("tree_roots_1", "tower_light_1", "tower_water_1", "lighthouse",
+              "magical_water_city", "port", "wooden_village", "wooden_city",
+              "mining_village", "magical_village", "mushroom_city",
+              "tree_roots_city"),
+    "tree_roots_1": ("tree_roots_2",), "tree_roots_2": ("tree_roots_3",),
+    "tree_roots_3": ("tree_roots_4",), "tree_roots_4": (),
+    "wooden_village": ("wooden_village_2",),
+    "wooden_village_2": ("wooden_city",),
+    "wooden_city": ("wooden_city_2",),
+    "wooden_city_2": ("great_city_cities", "great_city_tech_magic",
+                      "magical_city_of_cities"),
+    "wooden_port_city": ("great_city_cities", "great_city_tech_magic"),
+    "mining_village": ("mining_village_2",),
+    "mining_village_2": ("mining_city",),
+    "mining_city": ("mining_research_facility",),
+    "mining_research_facility": ("mining_research_city_2",),
+    "mining_research_city_2": ("great_city_cities", "great_city_tech_magic",
+                                "great_city_mining", "great_city_stone_wood",
+                                "great_city_magical_mining", "light_research_facility"),
+    "magical_village": ("magical_village_2",),
+    "magical_village_2": ("magical_city", "magical_water_city"),
+    "magical_city": ("great_city_cities", "great_city_tech_magic", "magical_city_of_cities", "magical_water_city"),
+    "mushroom_city": ("great_city_cities", "great_city_tech_magic", "magical_city_of_cities"),
+    "mushroom_port_city": ("great_city_cities", "great_city_tech_magic"),
+    "tree_roots_city": ("great_city_cities", "great_city_tech_magic", "magical_city_of_cities"),
+    "tree_roots_port_city": ("great_city_cities", "great_city_tech_magic"),
+    "magical_water_city": ("great_city_cities", "great_city_tech_magic", "magical_city_of_cities"),
+    "port": ("port_2",),
+    "port_2": ("mainport_1", "wooden_port_city", "magical_port_city",
+               "mushroom_port_city", "tree_roots_port_city"),
+    "mainport_1": ("mainport_2", "great_city_cities", "great_city_tech_magic"),
+    "lighthouse": (), "tower_light_1": ("tower_light_2",),
+    "tower_light_2": (), "tower_water_1": (), "great_city_cities": (),
+    "great_city_tech_magic": (), "magical_city_of_cities": (),
+    "great_city_mining": (), "great_city_stone_wood": (),
+    "great_city_magical_mining": (), "light_research_facility": (),
+}
+
+# Các ID dùng trong cơ chế chiếu sáng/điều kiện lân cận.
+TOWER_IDS = {"tower_light_1", "tower_light_2"}
+CITY_IDS = {
+    "wooden_city", "wooden_city_2", "wooden_port_city", "mining_city",
+    "mining_research_city_2", "magical_city", "mushroom_city",
+    "mushroom_port_city", "tree_roots_city", "tree_roots_port_city",
+    "magical_water_city", "great_city_cities", "great_city_tech_magic",
+    "magical_city_of_cities", "great_city_mining", "great_city_stone_wood",
+    "great_city_magical_mining", "magical_port_city",
+}
+MAGIC_IDS = {
+    "magical_village", "magical_village_2", "magical_city", "mushroom_city",
+    "mushroom_port_city", "tree_roots_city", "tree_roots_port_city", "magical_port_city",
+    "magical_water_city", "great_city_tech_magic", "magical_city_of_cities",
+    "great_city_magical_mining", "tower_light_1", "tower_light_2",
+    "tower_water_1", "potion_factory_1", "potion_factory_2",
+    "potion_factory_3",
+}
+
+
+def _base_id(kind):
+    return {
+        "grass": "field", "forest": "forest_1", "rock": "rock_1",
+        "mushroom": "mushroom_1", "water": "water_1", "circle": "stone_circle_1",
+    }.get(kind, "field")
+
+
+def level_info(kind, lvl):
+    """Trả thông tin công trình thật; chấp nhận cả TileLevel và int cũ."""
+    building_id = getattr(lvl, "building_id", None)
+    if building_id in STRUCTURES:
+        return STRUCTURES[building_id]
+    chain = CHAINS.get(kind, ())
+    try:
+        level = int(lvl)
+    except (TypeError, ValueError):
+        level = 1
+    if chain:
+        return chain[max(0, min(level - 1, len(chain) - 1))]
+    return STRUCTURES[_base_id(kind)]
+
+
+def _state_info(pos, terrain, tiles):
+    return level_info(terrain[pos], tiles.get(pos, 1))
+
+
+def _adjacent(pos, terrain, tiles, excluded=()):
+    """Trả các ô liền kề hợp lệ; có thể bỏ qua ô đã bị bóng tối nuốt."""
+    excluded = excluded if isinstance(excluded, (set, frozenset)) else set(excluded)
+    return [(q, terrain[q], _state_info(q, terrain, tiles))
+            for q in neighbors(pos) if q in terrain and q not in excluded]
+
+
+def _adj_count(pos, terrain, tiles, predicate, excluded=()):
+    return sum(1 for q, kind, info in _adjacent(pos, terrain, tiles, excluded)
+               if predicate(q, kind, info))
+
+
+def _adj_has(pos, terrain, tiles, predicate, excluded=()):
+    return _adj_count(pos, terrain, tiles, predicate, excluded) > 0
+
+
+def _is_city(info):
+    return "city" in info["tags"] or info["id"] in CITY_IDS
+
+
+def _is_magic(info):
+    return "magic" in info["tags"] or "magic_building" in info["tags"] or info["id"] in MAGIC_IDS
+
+
+def _water_body_ports(pos, terrain, tiles):
+    """Đếm Port/Mainport thuộc cùng một vùng nước liên thông.
+
+    Một Port đứng trên ô đất kề nước; đếm Dock trên ô nước sẽ bỏ sót các
+    Port thực sự. Duyệt tập ô nước liên thông rồi gom các công trình ven bờ.
+    """
+    starts = [q for q in neighbors(pos) if terrain.get(q) == "water"]
+    seen = set(starts)
+    queue = deque(starts)
+    ports = set()
+    while queue:
+        water = queue.popleft()
+        for near in neighbors(water):
+            kind = terrain.get(near)
+            if kind == "water" and near not in seen:
+                seen.add(near)
+                queue.append(near)
+            elif kind == "grass" and _state_info(near, terrain, tiles)["id"] in {
+                "port", "port_2", "mainport_1", "mainport_2"
+            }:
+                ports.add(near)
+    return len(ports)
+
+
+def _water_body_docks(pos, terrain, tiles):
+    """API phụ để đọc số Dock vùng nước, không dùng cho yêu cầu Mainport."""
+    starts = [q for q in neighbors(pos) if terrain.get(q) == "water"]
+    seen, queue = set(starts), deque(starts)
+    count = 0
+    while queue:
+        water = queue.popleft()
+        if _state_info(water, terrain, tiles)["id"] == "dock":
+            count += 1
+        for near in neighbors(water):
+            if terrain.get(near) == "water" and near not in seen:
+                seen.add(near)
+                queue.append(near)
+    return count
+
+
+def _requirement(target_id, pos, terrain, tiles, res=None):
+    """Kiểm tra điều kiện địa hình của một nâng cấp; trả (đạt, lý do)."""
+    rule = STRUCTURES[target_id]["rule"]
+    adj = _adjacent(pos, terrain, tiles)
+    has_forest = lambda q, k, i: k == "forest" and i["family"] == "forest"
+    has_rock = lambda q, k, i: k == "rock" and i["family"] == "rock"
+    has_water = lambda q, k, i: k == "water"
+    has_mushroom = lambda q, k, i: i["family"] == "mushroom_forest"
+    has_magic = lambda q, k, i: _is_magic(i)
+    has_city = lambda q, k, i: _is_city(i)
+    has_city2 = lambda q, k, i: "city_level2" in i["tags"] or i["id"] in CITY_IDS and i["tier"] >= 2
+    has_tree_roots3 = lambda q, k, i: i["family"] == "tree_roots" and i["tier"] >= 3
+    has_mushroom3 = lambda q, k, i: i["family"] == "mushroom_forest" and i["tier"] >= 3
+    has_forest4 = lambda q, k, i: k == "forest" and i["family"] == "forest" and i["tier"] >= 4
+    has_rock4 = lambda q, k, i: k == "rock" and i["family"] == "rock" and i["tier"] >= 4
+    has_port_or_wood_city = lambda q, k, i: i["id"] in {
+        "wooden_city", "wooden_city_2", "wooden_port_city", "port", "port_2",
+        "mainport_1", "mainport_2", "magical_port_city", "mushroom_port_city",
+        "tree_roots_port_city"
+    }
+    has_tower_light = lambda q, k, i: i["id"] in TOWER_IDS
+
+    if rule == "always":
+        return True, ""
+    if rule == "adj_forest":
+        return (_adj_has(pos, terrain, tiles, has_forest), "Cần có Forest kề bên.")
+    if rule == "treetop_village":
+        count = _adj_count(pos, terrain, tiles, lambda q, k, i:
+                        k == "forest" and i["family"] == "forest" and i["tier"] == 1)
+        return count >= 4, "Cần đủ bốn Forest cấp 1 ở các ô kề bên."
+    if rule == "wooden_city_route":
+        # Nhánh tiến hóa thường từ Wooden Village Level 2 không cần điều kiện này.
+        if _state_info(pos, terrain, tiles)["id"] != "field":
+            return True, ""
+        forests = _adj_count(pos, terrain, tiles, has_forest)
+        village = _adj_has(pos, terrain, tiles, lambda q, k, i:
+                           "city_seed" in i["tags"] or i["family"] in {
+                               "wood_village", "mining_village", "magic_village", "treetop_village"
+                           })
+        return forests >= 3 and village, "Cần ít nhất 3 Forest và một ngôi làng kề bên."
+    if rule == "adj_rock":
+        return (_adj_has(pos, terrain, tiles, has_rock), "Cần có Rocks kề bên.")
+    if rule == "adj_mushroom":
+        return (_adj_has(pos, terrain, tiles, has_mushroom), "Cần có Mushroom Forest kề bên.")
+    if rule == "adj_water":
+        return (_adj_has(pos, terrain, tiles, has_water), "Cần có Water kề bên.")
+    if rule == "tree_roots_seed":
+        forests = _adj_count(pos, terrain, tiles, has_forest)
+        helper_building = _adj_has(
+            pos, terrain, tiles,
+            lambda q, k, i: "city_seed" in i["tags"] or has_port_or_wood_city(q, k, i)
+        )
+        return forests >= 3 and helper_building, "Cần 3 Forest và một Village/City kề bên."
+    if rule == "tower_light":
+        ok = _adj_has(pos, terrain, tiles, lambda q, k, i: i["id"] == "magical_village_2")
+        return ok, "Cần có Magical Village cấp 2 kề bên."
+    if rule == "tower_water":
+        # Yêu cầu Tower of Water được người chơi công bố: Water + Magic Village.
+        ok = _adj_has(pos, terrain, tiles, has_water) and _adj_has(
+            pos, terrain, tiles,
+            lambda q, k, i: i["id"] in {"magical_village", "magical_village_2"}
+        )
+        return ok, "Cần có Water và Magical Village ở các ô kề bên."
+    if rule == "lighthouse":
+        ok = _adj_has(pos, terrain, tiles, has_water) and _adj_has(
+            pos, terrain, tiles, lambda q, k, i: i["id"] in {"port", "port_2", "mainport_1", "mainport_2"})
+        return ok, "Cần có Water và Port kề bên."
+    if rule == "wooden_port_city":
+        ok = _adj_count(pos, terrain, tiles, has_forest4) >= 3 and _adj_has(pos, terrain, tiles, has_water)
+        return ok, "Cần Water và ít nhất 3 Forest cấp 4 kề bên."
+    if rule == "mushroom_city":
+        return (_adj_has(pos, terrain, tiles, has_mushroom3), "Cần Mushroom Forest cấp 3 kề bên.")
+    if rule == "mushroom_port_city":
+        ok = _adj_has(pos, terrain, tiles, has_mushroom3) and _adj_has(pos, terrain, tiles, has_water)
+        return ok, "Cần Mushroom Forest cấp 3 và Water kề bên."
+    if rule == "tree_roots_city":
+        return (_adj_has(pos, terrain, tiles, has_tree_roots3), "Cần Tree Roots cấp 3 trở lên kề bên.")
+    if rule == "tree_roots_port_city":
+        ok = _adj_has(pos, terrain, tiles, has_tree_roots3) and _adj_has(pos, terrain, tiles, has_water)
+        return ok, "Cần Tree Roots cấp 3+ và Water kề bên."
+    if rule == "magical_city":
+        return (_adj_has(pos, terrain, tiles, has_tower_light), "Cần có Tower of Light kề bên.")
+    if rule == "magical_port_city":
+        ok = _adj_has(pos, terrain, tiles, has_water) and _adj_has(pos, terrain, tiles, has_tower_light)
+        return ok, "Cần Water và Tower of Light kề bên."
+    if rule == "magical_water_city":
+        ok = _adj_has(pos, terrain, tiles, has_water) and _adj_has(pos, terrain, tiles, has_magic)
+        return ok, "Cần Water và một công trình phép thuật đã xây kề bên."
+    if rule == "mainport_1":
+        # Ghi nhận người chơi: 3 Port cùng một vùng nước để có Mainport.
+        ports_ok = _water_body_ports(pos, terrain, tiles) >= 3
+        city_nearby = _adj_has(pos, terrain, tiles, lambda q, k, i: _is_city(i))
+        return ports_ok and not city_nearby, (
+            "Cần ít nhất 3 Port cùng vùng nước và không có City kề bên."
+        )
+    if rule == "mainport_2":
+        # Mốc 4 Port là quy ước cân bằng của bản Python, chưa xác minh số gốc.
+        return (_water_body_ports(pos, terrain, tiles) >= 4,
+                "Cần ít nhất 4 Port/Mainport trong vùng nước liên thông.")
+    if rule == "great_city_cities":
+        ok = _adj_count(pos, terrain, tiles, has_city2) >= 4
+        return ok, "Cần 4 thành phố cấp 2 trở lên ở các ô liền kề."
+    if rule == "great_city_tech_magic":
+        cities = _adj_count(pos, terrain, tiles, has_city2)
+        magic = _adj_count(pos, terrain, tiles, has_magic)
+        allowed = _adj_count(pos, terrain, tiles, lambda q, k, i:
+                             (_is_city(i) and i["tier"] >= 2) or has_magic(q, k, i) or i["id"] in TOWER_IDS)
+        ok = cities >= 2 and magic >= 1 and allowed == len(adj)
+        return ok, "Cần ít nhất 2 thành phố cấp 2+, 1 công trình phép thuật; các ô kề còn lại phải là thành phố/phép thuật/Tower of Light."
+    if rule == "magical_city_of_cities":
+        ok = len(adj) == 4 and all(_is_city(i) or has_magic(q, k, i) or i["id"] in TOWER_IDS
+                                   for q, k, i in adj)
+        return ok, "Cả 4 ô kề phải là thành phố hoặc công trình phép thuật/ánh sáng."
+    if rule == "great_city_mining":
+        return (_adj_count(pos, terrain, tiles, has_rock4) >= 3, "Cần 3 Rocks cấp 4 kề bên.")
+    if rule == "great_city_stone_wood":
+        rocks = _adj_count(pos, terrain, tiles, has_rock4)
+        forests = _adj_count(pos, terrain, tiles, has_forest4)
+        return (rocks >= 2 and forests >= 2, "Cần 2 Rocks và 2 Forest cấp 4+ kề bên.")
+    if rule == "great_city_magical_mining":
+        rocks = _adj_count(pos, terrain, tiles, has_rock4)
+        magic_land = _adj_has(pos, terrain, tiles, lambda q, k, i: has_mushroom3(q, k, i) or has_tree_roots3(q, k, i))
+        return (rocks >= 2 and magic_land, "Cần 2 Rocks cấp 4+ và Mushroom Forest/Tree Roots cấp 3+ kề bên.")
+    if rule == "light_research":
+        has_tech = (res or {}).get("tech", 0) >= TECH_WIN
+        return has_tech, f"Cần đủ {TECH_WIN} Công nghệ để xây Light Research Facility."
+    if rule == "potion_factory":
+        ok = _adj_has(pos, terrain, tiles, lambda q, k, i: i["family"] == "tree_roots" and i["tier"] >= 4)
+        return ok, "Cần Tree Roots cấp 4 kề bên Forest cấp 4."
+    return False, "Điều kiện nâng cấp chưa được định nghĩa."
+
+
+def _cost_for(target, counts):
+    """Tính giá tăng dần theo số lần đã xây cùng công trình/cấp đích."""
+    count = counts.get((target["id"], target["tier"]), 0)
+    cost = {}
+    for resource in RES_VI:
+        value = target["base"].get(resource, 0) + count * target["step"].get(resource, 0)
+        if value > 0:
+            cost[resource] = int(value) if float(value).is_integer() else value
+    return cost
+
+
+def _available_targets(pos, terrain, tiles, counts, res=None):
+    """Các đích nâng cấp hợp lệ, sắp xếp lựa chọn đủ tiền lên trước."""
+    current = _state_info(pos, terrain, tiles)
+    choices = []
+    blocked_reasons = []
+    for target_id in UPGRADES.get(current["id"], ()):
+        target = STRUCTURES[target_id]
+        ok, reason = _requirement(target_id, pos, terrain, tiles, res)
+        if not ok:
+            blocked_reasons.append((target.get("priority", 50), target, reason))
+            continue
+        cost = _cost_for(target, counts)
+        affordable = res is not None and all(res.get(k, 0) >= v for k, v in cost.items())
+        # Chỉ dùng priority để sắp xếp HUD mặc định; UI vẫn cho chọn nhánh khác.
+        choices.append((0 if affordable else 1, target.get("priority", 50), target, cost))
+    choices.sort(key=lambda item: (item[0], item[1], item[2]["name"]))
+    return choices, blocked_reasons
+
+
+def available_upgrades(pos, terrain, tiles, counts, res=None, *, affordable_only=False):
+    """Trả danh sách nhánh nâng cấp hợp lệ cho UI; không sửa trạng thái game."""
+    if pos not in terrain:
+        return []
+    choices, _ = _available_targets(pos, terrain, tiles, counts, res)
+    result = []
+    for _, _, target, cost in choices:
+        affordable = res is not None and all(res.get(k, 0) >= value for k, value in cost.items())
+        if affordable_only and not affordable:
+            continue
+        result.append({
+            "id": target["id"],
+            "name": target["name"],
+            "tier": target["tier"],
+            "cost": dict(cost),
+            "affordable": affordable,
+            "structure": target,
+        })
+    return result
+
+
+def _first_blocked_reason(pos, terrain, tiles, counts, res=None):
+    current = _state_info(pos, terrain, tiles)
+    options = UPGRADES.get(current["id"], ())
+    if not options:
+        return "Ô này đã ở cấp tối đa."
+    _, blocked = _available_targets(pos, terrain, tiles, counts, res)
+    if blocked:
+        blocked.sort(key=lambda item: (item[0], item[1]["name"]))
+        return blocked[0][2]
+    # Có nhánh hợp lệ nhưng thiếu tài nguyên: báo theo nhánh ưu tiên nhất.
+    target = STRUCTURES[options[0]]
+    cost = _cost_for(target, counts)
+    deficits = [f"thiếu {RES_VI[k]} ({res.get(k, 0)}/{v})"
+                for k, v in cost.items() if res is not None and res.get(k, 0) < v]
+    if deficits:
+        return "; ".join(deficits)
+    return "Chưa đủ điều kiện nâng cấp."
+
+
 def new_resources():
     return {"wood": 10, "stone": 0, "mana": 0, "tech": 0}
 
 
 def new_carry():
-    return {k: 0.0 for k in RES_VI}
+    return {resource: 0.0 for resource in RES_VI}
 
 
 def cost_text(cost):
-    return ", ".join(f"{v} {RES_VI[k]}" for k, v in cost.items())
+    parts = [f"{cost[k]} {RES_VI[k]}" for k in RES_VI if cost.get(k, 0) > 0]
+    return ", ".join(parts) if parts else "Miễn phí"
 
 
 def effect_text(lv):
-    """Mô tả tác dụng của một cấp: sản lượng/phút hoặc mô tả riêng."""
-    parts = []
-    if lv["prod"]:
-        parts.append(", ".join(f"{v:g} {RES_VI[k]}/phút" for k, v in lv["prod"].items()))
-    if lv["boost"]:
-        parts.append("Ô kề bên: " + ", ".join(f"+{v * 100:g}% {RES_VI[k]}"
-                                               for k, v in lv["boost"].items()))
-    if lv["desc"]:
-        parts.append(lv["desc"])
-    return "; ".join(parts) if parts else "chưa sản xuất"
+    """Hiển thị sản lượng/phút kèm các hiệu ứng kinh tế quan trọng."""
+    prod = lv.get("prod", {})
+    parts = [f"{prod[k]:g} {RES_VI.get(k, k)}/phút" for k in RES_VI if k in prod]
+    building_id = lv.get("id")
+    if building_id == "potion_factory_1":
+        parts.append("nhân đôi sản lượng Gỗ và Đá toàn bản đồ")
+    elif building_id in {"potion_factory_2", "potion_factory_3"}:
+        parts.append("nhân ba sản lượng Gỗ và Đá toàn bản đồ")
+    elif building_id == "magical_water_city":
+        parts.append("có thể tăng sản lượng Potion Factory khi đủ công trình kề bên")
+    boost = lv.get("boost")
+    if boost:
+        parts.append(f"{BOOST_NEIGHBORS} ô xung quanh: " + ", ".join(
+            f"+{value * 100:g}% {RES_VI.get(k, k)}" for k, value in boost.items()))
+    if parts:
+        return ", ".join(parts)
+    return lv.get("desc") or "Không tạo tài nguyên trực tiếp."
 
 
-def level_info(kind, lvl):
-    """Tra cấp theo LOẠI ô. Không biết vị trí nên không thấy chuỗi Magic Workshop;
-    chỗ nào có pos thì dùng level_at."""
-    return CHAINS[kind][lvl - 1]
+def next_level(pos, terrain, tiles, counts, res=None, dark_cells=()):
+    """Trả (thông tin công trình kế tiếp, giá hiện tại) hoặc None.
 
-
-def _next_to(pos, terrain, tiles, dark_cells, sprite):
-    """Có ô kề bên (chưa bị bóng tối nuốt) đang là công trình có sprite này không?"""
-    return any(n not in dark_cells and n in tiles
-               and level_at(n, terrain, tiles[n])["sprite"] == sprite
-               for n in neighbors(pos))
-
-
-def chain_at(pos, terrain, tiles=None, dark_cells=()):
-    """Chuỗi cấp của ô pos.
-    - Ô cỏ chưa xây, kề Magic Workshop 2, và chưa có Tower nào -> chuỗi Tower of Light
-      (chỉ xét khi truyền tiles; khi không truyền thì chỉ tra chuỗi cố định của ô).
-    - Ô cỏ kề rừng nấm -> chuỗi Magic Workshop thay cho Workshop.
-    - Còn lại -> chuỗi theo loại ô."""
-    kind = terrain[pos]
-    if kind == "grass":
-        if (tiles is not None and pos not in tiles and not towers(terrain, tiles)
-                and _next_to(pos, terrain, tiles, dark_cells, "Magic Workshop 2")):
-            return CHAINS["grass_tower"]
-        if any(terrain.get(n) == "mushroom" for n in neighbors(pos)):
-            return CHAINS["grass_magic"]
-    return CHAINS[kind]
-
-
-def level_at(pos, terrain, lvl):
-    return chain_at(pos, terrain)[lvl - 1]
-
-
-def towers(terrain, tiles):
-    return [p for p, lvl in tiles.items()
-            if level_at(p, terrain, lvl)["name"] == "Tower of Light"]
-
-
-def next_level(pos, terrain, tiles, counts, dark_cells=()):
-    """(thông tin cấp kế tiếp, chi phí lần này) hoặc None nếu đã tối đa."""
-    kind = terrain[pos]
-    chain = chain_at(pos, terrain, tiles, dark_cells)
-    lvl = tiles.get(pos, 1)
-    if lvl >= len(chain):
+    Với nhiều nhánh, Main.py dùng bộ chọn của can_upgrade trước khi gọi upgrade;
+    lời gọi trực tiếp không có lựa chọn sẽ chọn nhánh đủ giá và ưu tiên cao.
+    Tương thích cách gọi cũ next_level(pos, terrain, tiles, counts, dark_cells).
+    """
+    if res is not None and not isinstance(res, dict):
+        dark_cells, res = res, None
+    if pos not in terrain or pos in dark_cells:
         return None
-    nxt = chain[lvl]
-    n = counts.get((kind, lvl + 1), 0)  # đã nâng bao nhiêu ô lên cấp này rồi
-    cost = {}
-    for k in RES_VI:
-        v = nxt["base"].get(k, 0) + n * nxt["step"].get(k, 0)
-        if v > 0:
-            cost[k] = v
-    return nxt, cost
+    choices, _ = _available_targets(pos, terrain, tiles, counts, res)
+    if not choices:
+        return None
+    _, _, target, cost = choices[0]
+    return target, cost
 
 
-def can_upgrade(pos, terrain, tiles, counts, dark_cells, res, over=False):
+# Khi Main.py gọi can_upgrade -> upgrade không truyền target_id, lưu lựa chọn
+# của một lần bấm ở đây. Không sửa tiles/counts/res cho tới khi upgrade thành công.
+_PENDING_TARGET = None
+
+
+def _choose_upgrade_gui(options):
+    """Hộp thoại chọn nhánh (chỉ hiện khi đang chạy giao diện game Tkinter).
+
+    Trả (handled, target_id): handled=False khi chạy headless/test.
+    Nhấn Escape/Đóng = hủy giao dịch; không mua nhầm nhánh khác.
+    """
+    try:
+        import tkinter as tk
+        root = tk._default_root
+        if root is None or not root.winfo_exists() or "Stop the Darkness" not in root.title():
+            return False, None
+        dialog = tk.Toplevel(root)
+        dialog.title("Chọn công trình để xây")
+        dialog.configure(bg="#e7e1d5")
+        dialog.resizable(False, False)
+        dialog.transient(root)
+        selected = {"id": None}
+        tk.Label(dialog, text="CHỌN NHÁNH NÂNG CẤP", bg="#e7e1d5",
+                 fg="#302c26", font=("Arial", 12, "bold")).pack(padx=18, pady=(14, 6))
+        tk.Label(dialog, text="Các công trình mở khóa tại ô này:", bg="#e7e1d5",
+                 fg="#514a41").pack(padx=16, pady=(0, 7))
+        region = tk.Frame(dialog, bg="#e7e1d5")
+        region.pack(padx=12, fill="x")
+        def confirm(target_id):
+            selected["id"] = target_id
+            dialog.destroy()
+        for index, option in enumerate(options, 1):
+            label = (f"{index}. {option['name']}  (cấp {option['tier']})\n"
+                     f"     {cost_text(option['cost'])}"
+                     f"{'  [ĐỦ]' if option['affordable'] else '  [THIẾU]'}")
+            btn = tk.Button(region, text=label, anchor="w", justify="left",
+                            width=47, relief="groove", pady=3,
+                            command=lambda key=option["id"]: confirm(key),
+                            state="normal" if option["affordable"] else "disabled")
+            btn.pack(fill="x", pady=2)
+            if option["affordable"]:
+                dialog.bind(str(index), lambda e, key=option["id"]: confirm(key))
+        tk.Button(dialog, text="Hủy (Esc)", command=dialog.destroy,
+                  width=18, bg="#dad1c2").pack(pady=(10, 12))
+        dialog.bind("<Escape>", lambda e: dialog.destroy())
+        dialog.update_idletasks()
+        x = root.winfo_rootx() + (root.winfo_width() - dialog.winfo_width()) // 2
+        y = root.winfo_rooty() + (root.winfo_height() - dialog.winfo_height()) // 2
+        dialog.geometry(f"+{max(0, x)}+{max(0, y)}")
+        dialog.grab_set()
+        dialog.focus_force()
+        root.wait_window(dialog)
+        return True, selected["id"]
+    except (ImportError, RuntimeError):
+        return False, None
+
+
+def can_upgrade(pos, terrain, tiles, counts, dark_cells, res, over=False, target_id=None):
+    global _PENDING_TARGET
+    _PENDING_TARGET = None
     if over:
-        return False, "Game đã kết thúc"
+        return False, "Game đã kết thúc."
+    if pos not in terrain:
+        return False, "Ô không hợp lệ."
     if pos in dark_cells:
-        return False, "Ô này đã bị bóng tối nuốt"
-    info = next_level(pos, terrain, tiles, counts, dark_cells)
-    if info is None:
-        if len(chain_at(pos, terrain, tiles, dark_cells)) > 1:
-            return False, "Ô này đã ở cấp tối đa"
-        return False, "Ô này không nâng cấp được"
-    nxt, cost = info
-    if nxt["need"]:
-        kinds, min_lvl, text = nxt["need"]
-        if not any(terrain[n] in kinds and tiles.get(n, 1) >= min_lvl
-                   for n in neighbors(pos)):
-            return False, f"Cần {text} kề bên"
-    for k, v in cost.items():
-        if res[k] < v:
-            return False, f"Thiếu {RES_VI[k]} ({res[k]}/{v})"
+        return False, "Ô này đã bị bóng tối nuốt."
+    current = _state_info(pos, terrain, tiles)
+    options = UPGRADES.get(current["id"], ())
+    if not options:
+        return False, "Ô này đã ở cấp tối đa."
+
+    if target_id is not None:
+        if target_id not in options or target_id not in STRUCTURES:
+            return False, "Công trình được chọn không phải nhánh nâng cấp của ô này."
+        ok, reason = _requirement(target_id, pos, terrain, tiles, res)
+        if not ok:
+            return False, reason
+        cost = _cost_for(STRUCTURES[target_id], counts)
+        deficits = [f"thiếu {RES_VI[k]} ({res.get(k, 0)}/{v})"
+                    for k, v in cost.items() if res.get(k, 0) < v]
+        return (False, "; ".join(deficits)) if deficits else (True, "")
+
+    choices, _ = _available_targets(pos, terrain, tiles, counts, res)
+    if not choices:
+        return False, _first_blocked_reason(pos, terrain, tiles, counts, res)
+    affordable = [choice for choice in choices if all(res.get(k, 0) >= v for k, v in choice[3].items())]
+    if not affordable:
+        _, _, target, cost = choices[0]
+        deficits = [f"thiếu {RES_VI[k]} ({res.get(k, 0)}/{v})"
+                    for k, v in cost.items() if res.get(k, 0) < v]
+        return False, "; ".join(deficits) if deficits else "Không đủ tài nguyên."
+    if len(choices) > 1 and target_id is None:
+        options = available_upgrades(pos, terrain, tiles, counts, res)
+        handled, selection = _choose_upgrade_gui(options)
+        if handled:
+            if selection is None:
+                return False, "Đã hủy lựa chọn công trình."
+            _PENDING_TARGET = (id(tiles), pos, selection)
     return True, ""
 
 
-def upgrade(pos, terrain, tiles, counts, res, dark_cells=()):
-    """Trừ tài nguyên và nâng ô lên 1 cấp (đã kiểm tra can_upgrade trước).
-    Trả về (tên mới, cấp mới)."""
-    nxt, cost = next_level(pos, terrain, tiles, counts, dark_cells)
-    chain = chain_at(pos, terrain, tiles, dark_cells)
-    for k, v in cost.items():
-        res[k] -= v
-    kind = terrain[pos]
-    lvl = tiles.get(pos, 1) + 1
-    counts[(kind, lvl)] = counts.get((kind, lvl), 0) + 1
-    tiles[pos] = lvl
-    if chain is TOWER_CHAIN:
-        terrain[pos] = "tower"   # nhớ ô này là Tower (towers/level_at/vẽ sprite dựa vào đây)
-    return nxt["name"], lvl
+def upgrade(pos, terrain, tiles, counts, res, target_id=None, dark_cells=()):
+    """Xây công trình hợp lệ, trừ tài nguyên theo kiểu atomic và trả tên/cấp.
+
+    Main.py vẫn gọi can_upgrade trước để xử lý trạng thái game/tối. Hàm này tự
+    kiểm tra lại nhánh, điều kiện kề và tài nguyên để tránh trừ âm nếu được gọi
+    trực tiếp bởi module khác.
+    """
+    global _PENDING_TARGET
+    if target_id is not None and not isinstance(target_id, str):
+        dark_cells, target_id = target_id, None      # cách gọi cũ: upgrade(..., res, dark_cells)
+    if pos not in terrain:
+        raise ValueError("Ô không hợp lệ.")
+    if target_id is None and _PENDING_TARGET and _PENDING_TARGET[:2] == (id(tiles), pos):
+        target_id = _PENDING_TARGET[2]
+    _PENDING_TARGET = None
+
+    current = _state_info(pos, terrain, tiles)
+    options = UPGRADES.get(current["id"], ())
+    if not options:
+        raise ValueError("Ô này đã ở cấp tối đa.")
+
+    if target_id is None:
+        info = next_level(pos, terrain, tiles, counts, res)
+    elif target_id in options and target_id in STRUCTURES:
+        ok, reason = _requirement(target_id, pos, terrain, tiles, res)
+        info = (STRUCTURES[target_id], _cost_for(STRUCTURES[target_id], counts)) if ok else None
+        if not ok:
+            raise ValueError(reason)
+    else:
+        info = None
+
+    if info is None:
+        raise ValueError("Không có công trình kế tiếp đã mở khóa cho lựa chọn này.")
+
+    target, cost = info
+    deficits = [f"thiếu {RES_VI[resource]} ({res.get(resource, 0)}/{amount})"
+                for resource, amount in cost.items()
+                if res.get(resource, 0) < amount]
+    if deficits:
+        raise ValueError("; ".join(deficits))
+
+    # Chỉ trừ sau khi đã kiểm tra đủ tất cả tài nguyên: tránh trạng thái nửa chừng.
+    for resource, amount in cost.items():
+        res[resource] = res.get(resource, 0) - amount
+    tiles[pos] = TileLevel(target["stage"], target["id"])
+    count_key = (target["id"], target["tier"])
+    counts[count_key] = counts.get(count_key, 0) + 1
+    return target["name"], target["tier"]
+
+def describe(pos, terrain, tiles, counts, res, dark_cells=()):
+    """Trả nội dung khung ô theo đúng giao diện mà Main.py đang gọi."""
+    if pos not in terrain:
+        return ["Ô không hợp lệ"], "", [], ""
+    if pos in dark_cells:
+        return ["Ô đã bị bóng tối nuốt"], "", [], ""
+    cur = _state_info(pos, terrain, tiles)
+    tier_label = f" cấp {cur['tier']}" if cur["tier"] > 0 else ""
+    now = [f"{cur['name']}{tier_label}", "Sản lượng: " + effect_text(cur)]
+    if not UPGRADES.get(cur["id"], ()):
+        now.append("Đã đạt cấp tối đa")
+        return now, "", [], ""
+    choices, blocked = _available_targets(pos, terrain, tiles, counts, res)
+    if not choices:
+        _, why = (blocked[0][0], blocked[0][2]) if blocked else (50, "Chưa đủ điều kiện nâng cấp.")
+        return now, "Chưa mở khóa công trình kế tiếp", [], why
+    _, _, nxt, cost = choices[0]
+    nxt_tier = f" cấp {nxt['tier']}" if nxt["tier"] > 0 else ""
+    title = f"Nâng cấp tiếp theo: {nxt['name']}{nxt_tier}"
+    details = [f"Chi phí: {cost_text(cost)}", "Sản lượng: " + effect_text(nxt)]
+    # Bộ chọn hiển thị trong kinhte.can_upgrade() khi bấm ô có nhiều nhánh.
+    alternates = [choice[2]["name"] for choice in choices if choice[2]["id"] != nxt["id"]]
+    if alternates:
+        details.append("Nhánh khác có thể chọn: " + ", ".join(alternates))
+    deficits = [f"Thiếu {RES_VI[k]} ({res.get(k, 0)}/{v})"
+                for k, v in cost.items() if res.get(k, 0) < v]
+    return now, title, details, "; ".join(deficits)
+
+
+def towers(terrain, tiles):
+    """Trả các nguồn sáng; không thay đổi API của dark.is_lit().
+
+    Tower cấp 2 được mở rộng từ bán kính Manhattan 2 -> 3 bằng cách thêm
+    bốn điểm chiếu sáng phụ. Lighthouse cũng chiếu sáng bán kính 2.
+    """
+    emitters = set()
+    for pos in terrain:
+        building_id = _state_info(pos, terrain, tiles)["id"]
+        if building_id in TOWER_IDS or building_id == "lighthouse":
+            emitters.add(pos)
+        if building_id == "tower_light_2":
+            for p in neighbors(pos):
+                if p in terrain:
+                    emitters.add(p)
+    return sorted(emitters)
+
+
+def _all_info(terrain, tiles, dark_cells=()):
+    for pos in terrain:
+        if pos not in dark_cells:
+            yield pos, _state_info(pos, terrain, tiles)
+
+
+def _boost_adjacent(pos, terrain, tiles, excluded=()):
+    """Các ô nằm trong phạm vi bonus kiểu Workshop (4 hoặc 8 ô xung quanh)."""
+    excluded = excluded if isinstance(excluded, (set, frozenset)) else set(excluded)
+    offsets = [(1, 0), (-1, 0), (0, 1), (0, -1)]
+    if BOOST_NEIGHBORS >= 8:
+        offsets += [(1, 1), (1, -1), (-1, 1), (-1, -1)]
+    result = []
+    for dr, dc in offsets:
+        q = (pos[0] + dr, pos[1] + dc)
+        if q in terrain and q not in excluded:
+            result.append((q, terrain[q], _state_info(q, terrain, tiles)))
+    return result
+
+
+def _local_multipliers(pos, terrain, tiles, excluded, info=None):
+    """Hệ số nhân sản lượng của ô pos do các ô kề bên (rừng, đá, nấm, dock, thành phố).
+
+    Dùng chung cho income() và boost_at() để hai nơi không bao giờ lệch số.
+    """
+    info = info or _state_info(pos, terrain, tiles)
+    nearby = _adjacent(pos, terrain, tiles, excluded)
+    wood_neighbors = sum(1 for q, kind, inf in nearby
+                         if kind == "forest" and inf["family"] == "forest")
+    rock_neighbors = sum(1 for q, kind, inf in nearby
+                         if kind == "rock" and inf["family"] == "rock" and inf["tier"] >= 2)
+    mush_neighbors = sum(1 for q, kind, inf in nearby
+                         if inf["family"] == "mushroom_forest" and inf["tier"] >= 2)
+    city_neighbors = sum(1 for q, kind, inf in nearby if _is_city(inf))
+    dock_neighbors = sum(1 for q, kind, inf in nearby if inf["id"] == "dock")
+    mana = 1.0 + MUSHROOM_ADJACENCY_BONUS * mush_neighbors
+    if _is_magic(info):
+        mana += DOCK_MAGIC_BONUS * dock_neighbors
+    # Bonus kiểu Workshop của các công trình xung quanh (8 ô), cộng dồn theo từng tài nguyên.
+    workshop = {}
+    for _q, _kind, inf in _boost_adjacent(pos, terrain, tiles, excluded):
+        for resource, value in inf.get("boost", {}).items():
+            workshop[resource] = workshop.get(resource, 0.0) + value
+    return {
+        "wood": 1.0 + WOOD_ADJACENCY_BONUS * wood_neighbors + workshop.get("wood", 0.0),
+        "stone": 1.0 + ROCK_ADJACENCY_BONUS * rock_neighbors + workshop.get("stone", 0.0),
+        "mana": mana + workshop.get("mana", 0.0),
+        "tech": 1.0 + CITY_TECH_BONUS * city_neighbors + workshop.get("tech", 0.0),
+    }
+
+
+def boost_at(pos, terrain, tiles, dark_cells=()):
+    """Hệ số nhân sản lượng của ô pos do ô kề bên (API cũ của Main.py).
+    Ô bị bóng tối nuốt không còn tạo bonus."""
+    return _local_multipliers(pos, terrain, tiles, set(dark_cells or ()))
+
+
+def income(terrain, tiles, dark_cells):
+    """Tính sản lượng/phút sau khi áp dụng hiệu ứng lân cận/toàn bản đồ.
+
+    * Mỗi Forest đang tồn tại kề một ô sẽ cộng 25% vào sản lượng Gỗ của ô đó.
+    * Rock/Mushroom/City tăng sản lượng tương ứng theo hệ số cân bằng mô phỏng.
+    * Dock kề công trình phép thuật tăng sản lượng Mana theo DOCK_MAGIC_BONUS.
+    * Làng/thành phố có `boost` (Workshop / Magic Workshop, xem BOOST_BY_ID) tăng
+      sản lượng của các ô xung quanh (BOOST_NEIGHBORS = 8); nhiều ô cộng dồn.
+    * Potion Factory cấp 1/2+ nhân x2/x3 sản lượng Gỗ và Đá toàn bản đồ.
+    * Potion Factory nhận hệ số 2.25x khi kề Magical Water City và thành phố này
+      kề Great City of Tech and Magic; nếu Factory đồng thời kề Water, nhân 1.5x.
+
+    Ô đã bị bóng tối nuốt không sản xuất và không còn tạo bonus lân cận.
+    """
+    excluded = set(dark_cells or ())
+    active = list(_all_info(terrain, tiles, excluded))
+    total = {resource: 0.0 for resource in RES_VI}
+
+    potion_tier = max((info["tier"] for _, info in active
+                       if info["family"] == "potion_factory"), default=0)
+    wood_stone_multiplier = 3.0 if potion_tier >= 2 else 2.0 if potion_tier == 1 else 1.0
+
+    def is_forest(_q, kind, info):
+        # Chỉ ô còn là Forest thật mới tạo bonus; Potion Factory đã thay thế Forest.
+        return kind == "forest" and info["family"] == "forest"
+
+    def is_dock(_q, _kind, info):
+        return info["id"] == "dock"
+
+    def is_water(_q, kind, _info):
+        return kind == "water"
+
+    def is_great_tech_magic(_q, _kind, info):
+        return info["id"] == "great_city_tech_magic"
+
+    def is_magical_water_city(_q, _kind, info):
+        return info["id"] == "magical_water_city"
+
+    for pos, info in active:
+        # Bonus của Potion Factory. Loại trừ ô tối để công trình đã bị nuốt không
+        # tiếp tục tăng sản lượng của công trình khác.
+        multiplier = 1.0
+        if info["family"] == "potion_factory":
+            touches_water = _adj_has(pos, terrain, tiles, is_water, excluded)
+            for q, _kind, neighbor_info in _adjacent(pos, terrain, tiles, excluded):
+                if neighbor_info["id"] == "magical_water_city" and _adj_has(
+                    q, terrain, tiles, is_great_tech_magic, excluded
+                ):
+                    multiplier *= 2.25
+                    if touches_water:
+                        multiplier *= 1.5
+                    break
+
+        local = _local_multipliers(pos, terrain, tiles, excluded, info)
+        for resource, amount in info["prod"].items():
+            local_multiplier = local.get(resource, 1.0)
+            global_multiplier = (
+                wood_stone_multiplier if resource in ("wood", "stone") else 1.0
+            )
+            total[resource] += amount * local_multiplier * global_multiplier * multiplier
+
+    return {resource: round(value, 4) for resource, value in total.items()}
+
+# ---------- tương thích API của phiên bản cũ (chuỗi CHAINS / ô "tower") ----------
+CIRCLE_COST = dict(STRUCTURES["stone_circle_2"]["base"])   # = chi phí kích hoạt vòng đá
+
+
+def chain_at(pos, terrain, tiles=None, dark_cells=()):
+    """Chuỗi cấp tuyến tính theo loại ô. Nhánh Field thật nằm ở UPGRADES."""
+    return CHAINS.get(terrain[pos], CHAINS["grass"])
+
+
+def level_at(pos, terrain, lvl):
+    return level_info(terrain[pos], lvl)
 
 
 def reset_terrain(terrain):
-    """Trả các ô "tower" về cỏ khi bắt đầu ván mới trên cùng một bản đồ."""
+    """Bản cũ đổi ô Tower thành terrain "tower"; bản mới giữ terrain là cỏ nên chỉ
+    cần trả các ô "tower" sót lại (nếu có) về cỏ khi bắt đầu ván mới."""
     for p, kind in terrain.items():
         if kind == "tower":
             terrain[p] = "grass"
 
 
-def describe(pos, terrain, tiles, counts, res, dark_cells=()):
-    """Nội dung khung thông tin: (dòng hiện tại, tiêu đề cấp kế, dòng cấp kế, cảnh báo)."""
-    chain = chain_at(pos, terrain, tiles, dark_cells)
-    lvl = tiles.get(pos, 1)
-    cur = chain[lvl - 1]
-    if len(chain) == 1:
-        return [cur["name"], "Không nâng cấp được"], "", [], ""
-    now = [f"{cur['name']} - cấp {lvl}/{len(chain)}", "Sản lượng: " + effect_text(cur)]
-    info = next_level(pos, terrain, tiles, counts, dark_cells)
-    if info is None:
-        now.append("Đã đạt cấp tối đa")
-        return now, "", [], ""
-    nxt, cost = info
-    ok, reason = can_upgrade(pos, terrain, tiles, counts, dark_cells, res)
-    return (now, f"Nâng lên cấp {lvl + 1}: {nxt['name']}",
-            [f"Chi phí: {cost_text(cost)}", "Sản lượng: " + effect_text(nxt)],
-            "" if ok else reason)
-
-
-def boost_at(pos, terrain, tiles, dark_cells):
-    """Hệ số nhân sản lượng của ô pos, do các ô kề bên có boost (vd Workshop).
-    Nhiều ô boost cộng dồn: 2 Workshop cấp 1 kề nhau = +50%. Ô bị bóng tối nuốt thì mất boost."""
-    mult = {}
-    for n in neighbors(pos):
-        if n in dark_cells or n not in tiles:
-            continue
-        for k, v in level_at(n, terrain, tiles[n])["boost"].items():
-            mult[k] = mult.get(k, 1.0) + v
-    return mult
-
-
-def income(terrain, tiles, dark_cells):
-    """Tài nguyên thu được mỗi PHÚT (hiện cạnh số trên HUD)."""
-    inc = {k: 0 for k in RES_VI}
-    for pos, lvl in tiles.items():
-        if pos in dark_cells:
-            continue
-        mult = boost_at(pos, terrain, tiles, dark_cells)
-        for k, v in level_at(pos, terrain, lvl)["prod"].items():
-            inc[k] += v * mult.get(k, 1.0)
-    return inc
-
-
 def produce(terrain, tiles, dark_cells, res, carry):
-    """Mỗi nhịp: cộng phần sản lượng của nhịp đó vào carry, đủ 1 đơn vị thì chuyển sang res."""
-    for k, v in income(terrain, tiles, dark_cells).items():
-        carry[k] += v * PER_TICK
-        whole = int(carry[k] + 1e-9)
-        if whole:
-            res[k] += whole
-            carry[k] -= whole
+    """Cộng sản lượng mỗi nhịp; giữ phần thập phân để không mất tài nguyên."""
+    for resource, per_minute in income(terrain, tiles, dark_cells).items():
+        carry[resource] = carry.get(resource, 0.0) + per_minute * PER_TICK
+        whole = int(carry[resource] + 1e-9)
+        if whole > 0:
+            res[resource] = res.get(resource, 0) + whole
+            carry[resource] = max(0.0, carry[resource] - whole)
 
 
 def check_win(terrain, tiles, res):
-    """Trả về thông báo thắng hoặc None."""
-    for pos, lvl in tiles.items():
-        if terrain[pos] == "circle" and lvl >= len(CHAINS["circle"]):
-            return "CHIẾN THẮNG! Vòng đá đã được kích hoạt, bóng tối bị đẩy lùi."
+    """Kiểm tra các hướng chiến thắng có trong bộ công trình.
+
+    Stone Circle cấp 2 và Light Research Facility là hai cách thắng chuẩn.
+    Potion Factory cấp 3 chỉ thắng ở mode Extended khi được chọn rõ ràng.
+    Tower of Light và lượng Tech thô không tự động kết thúc ván.
+    """
+    built = {_state_info(pos, terrain, tiles)["id"] for pos in terrain}
+    if "stone_circle_2" in built:
+        return "CHIẾN THẮNG! Stone Circle Level 2 đã chặn bóng tối."
+    if "light_research_facility" in built:
+        return "CHIẾN THẮNG! Light Research Facility đã tìm ra cách ngăn bóng tối."
+    if GAME_MODE == "extended" and "potion_factory_3" in built:
+        return "CHIẾN THẮNG! Potion Factory Level 3 đã hoàn tất nhánh giả kim."
     return None
+
+
+
+# Những loại luật này đều phải có nhánh xử lý tường minh trong _requirement.
+# Validator dùng danh sách này để phát hiện công trình được khai báo nhưng quên code điều kiện.
+RULE_HANDLERS = frozenset({
+    "always", "adj_forest", "treetop_village", "wooden_city_route", "adj_rock",
+    "adj_mushroom", "adj_water", "tree_roots_seed", "tower_light", "tower_water",
+    "lighthouse", "wooden_port_city", "mushroom_city", "mushroom_port_city",
+    "tree_roots_city", "tree_roots_port_city", "magical_city", "magical_port_city",
+    "magical_water_city", "mainport_1", "mainport_2", "great_city_cities",
+    "great_city_tech_magic", "magical_city_of_cities", "great_city_mining",
+    "great_city_stone_wood", "great_city_magical_mining", "light_research",
+    "potion_factory",
+})
+BASE_BUILDINGS = frozenset({
+    "field", "forest_1", "rock_1", "mushroom_1", "water_1", "stone_circle_1",
+})
+
+
+def validate_catalog():
+    """Rà tính nhất quán catalog; trả danh sách lỗi (rỗng nghĩa là pass)."""
+    errors = []
+    required_keys = {"id", "name", "kind", "tier", "stage", "family", "tags",
+                     "prod", "base", "step", "rule", "sprite", "desc", "priority", "boost"}
+    resource_keys = set(RES_VI)
+    valid_kinds = {"grass", "forest", "rock", "mushroom", "water", "circle"}
+
+    for building_id, info in STRUCTURES.items():
+        missing = required_keys - set(info)
+        if missing:
+            errors.append(f"{building_id}: thiếu field {sorted(missing)}")
+        if info.get("id") != building_id:
+            errors.append(f"{building_id}: ID trong record không khớp key")
+        if info.get("kind") not in valid_kinds:
+            errors.append(f"{building_id}: loại địa hình không hợp lệ {info.get('kind')!r}")
+        if info.get("rule") not in RULE_HANDLERS:
+            errors.append(f"{building_id}: chưa có handler cho rule {info.get('rule')!r}")
+        sprite = info.get("sprite")
+        if sprite is not None and sprite not in BUILD_SPRITES:
+            errors.append(f"{building_id}: sprite {sprite!r} không có trong BUILD_SPRITES")
+        if sprite is not None and sprite in BUILD_SPRITES:
+            for pixel in BUILD_SPRITES[sprite]:
+                if len(pixel) != 5 or not all(isinstance(v, (int, float)) for v in pixel[:4]):
+                    errors.append(f"{building_id}: sprite {sprite!r} có hình chữ nhật lỗi")
+                    break
+        if not isinstance(info.get("priority"), int):
+            errors.append(f"{building_id}: priority phải là số nguyên")
+        if not isinstance(info.get("name"), str) or not info["name"].strip():
+            errors.append(f"{building_id}: thiếu tên hợp lệ")
+        for section in ("prod", "base", "step"):
+            for resource, value in info.get(section, {}).items():
+                if resource not in resource_keys:
+                    errors.append(f"{building_id}.{section}: tài nguyên lạ {resource}")
+                if not isinstance(value, (int, float)) or isinstance(value, bool) or value < 0:
+                    errors.append(f"{building_id}.{section}.{resource}: giá trị phải là số không âm")
+        for resource, value in info.get("boost", {}).items():
+            if resource not in resource_keys:
+                errors.append(f"{building_id}.boost: tài nguyên lạ {resource}")
+            if not isinstance(value, (int, float)) or isinstance(value, bool) or value < 0:
+                errors.append(f"{building_id}.boost.{resource}: giá trị phải là số không âm")
+        if not isinstance(info.get("tier"), int) or info["tier"] < 0:
+            errors.append(f"{building_id}: tier phải là số nguyên không âm")
+        if not isinstance(info.get("stage"), int) or not 1 <= info["stage"] <= 4:
+            errors.append(f"{building_id}: stage phải là số nguyên từ 1 đến 4")
+        if not isinstance(info.get("tags"), (set, frozenset, tuple, list)):
+            errors.append(f"{building_id}: tags phải là một tập hợp")
+
+    incoming = {building_id: [] for building_id in STRUCTURES}
+    for source, targets in UPGRADES.items():
+        if source not in STRUCTURES:
+            errors.append(f"UPGRADES: nguồn không tồn tại {source}")
+            continue
+        if len(targets) != len(set(targets)):
+            errors.append(f"UPGRADES[{source}]: có nhánh nâng cấp bị lặp")
+        for target in targets:
+            if target not in STRUCTURES:
+                errors.append(f"UPGRADES[{source}]: đích không tồn tại {target}")
+            else:
+                incoming[target].append(source)
+                if STRUCTURES[target]["kind"] != STRUCTURES[source]["kind"]:
+                    errors.append(f"UPGRADES[{source}] => {target}: khác loại địa hình")
+
+    for building_id, sources in incoming.items():
+        if building_id not in BASE_BUILDINGS and not sources:
+            errors.append(f"{building_id}: công trình không có đường nâng cấp đi tới")
+
+    # Tìm các ID có thể đi tới từ địa hình/công trình khởi đầu.
+    reachable = set(BASE_BUILDINGS)
+    pending = deque(BASE_BUILDINGS)
+    while pending:
+        source = pending.popleft()
+        for target in UPGRADES.get(source, ()):
+            if target in STRUCTURES and target not in reachable:
+                reachable.add(target)
+                pending.append(target)
+    for building_id in sorted(set(STRUCTURES) - reachable):
+        errors.append(f"{building_id}: không thể tiếp cận từ công trình khởi đầu")
+
+    # Phát hiện vòng lặp trong đồ thị nâng cấp.
+    visiting, visited = set(), set()
+    def visit(node):
+        if node in visiting:
+            errors.append(f"UPGRADES: phát hiện vòng lặp qua {node}")
+            return
+        if node in visited:
+            return
+        visiting.add(node)
+        for target in UPGRADES.get(node, ()):
+            if target in STRUCTURES:
+                visit(target)
+        visiting.remove(node)
+        visited.add(node)
+
+    for node in STRUCTURES:
+        visit(node)
+
+    return errors
